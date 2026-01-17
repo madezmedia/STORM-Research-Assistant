@@ -1,23 +1,30 @@
-# Minimal requirements for Vercel debugging
-# Vercel Python handles ASGI natively - no Mangum needed
+# Vercel Python Serverless Requirements
+# Vercel handles ASGI natively - no Mangum needed
 
+# Core Framework
 fastapi>=0.104.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
 
-# # Full requirements (uncomment after debug):
-# pydantic>=2.5.0
-# pydantic-settings>=2.1.0
-# uvicorn[standard]>=0.23.0
-# sqlalchemy>=2.0.23
-# asyncpg>=0.29.0
-# alembic>=1.12.0
-# greenlet>=3.0.0
-# redis>=5.0.0
-# python-dotenv>=1.0.0
-# python-jose[cryptography]>=3.3.0
-# openai>=1.12.0
-# anthropic>=0.18.0
-# google-generativeai>=0.8.0
-# httpx>=0.25.0
-# aiohttp>=3.9.0
-# beautifulsoup4>=4.12.0
-# markdownify>=0.11.0
+# Database (optional - app works without)
+sqlalchemy>=2.0.23
+asyncpg>=0.29.0
+greenlet>=3.0.0
+
+# Cache (optional - app works without)
+redis>=5.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# HTTP Client
+httpx>=0.25.0
+
+# Content Processing
+beautifulsoup4>=4.12.0
+markdownify>=0.11.0
+
+# LLM Providers (optional - app works without)
+openai>=1.12.0
+anthropic>=0.18.0
+google-generativeai>=0.8.0
