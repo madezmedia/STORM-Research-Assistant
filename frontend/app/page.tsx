@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 
 interface GenerationStatus {
   brief_id: string;
@@ -19,6 +19,13 @@ interface Message {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
 
+// Global counter to ensure unique IDs across re-renders
+let globalMessageId = 0;
+const generateMessageId = () => {
+  globalMessageId += 1;
+  return `msg-${globalMessageId}-${Math.random().toString(36).substr(2, 9)}`;
+};
+
 export default function Home() {
   const [topic, setTopic] = useState('');
   const [contentType, setContentType] = useState('blog-post');
@@ -28,12 +35,10 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [generationStatus, setGenerationStatus] = useState<GenerationStatus | null>(null);
   const [briefId, setBriefId] = useState<string | null>(null);
-  const messageIdCounter = useRef(0);
 
   const addMessage = (role: 'user' | 'assistant', content: string) => {
-    messageIdCounter.current += 1;
     setMessages(prev => [...prev, {
-      id: `msg-${messageIdCounter.current}-${Date.now()}`,
+      id: generateMessageId(),
       role,
       content,
       timestamp: new Date()
