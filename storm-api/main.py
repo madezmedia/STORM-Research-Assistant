@@ -39,33 +39,47 @@ from anthropic import AsyncAnthropic
 from bs4 import BeautifulSoup
 import markdownify
 
-# Import STORM modules
-from app.analysis import (
-    StormOutline, Section, Subsection, generate_storm_analysis_prompt,
-    generate_research_queries, analyze_topic,
-)
-from app.research import (
-    ResearchQuery, generate_research_queries as gen_queries, prioritize_queries,
-)
-from app.search import (
-    GoogleSearchClient, BingSearchClient, LocalBusiness,
-    LocalLandmark, LocalMediaOutlet, CityStatistics,
-    WebSearchConfig, ResearchDataResponse, get_search_client,
-)
-from app.generation import (
-    SectionWriter, SectionWriterResponse, ContentAssembler,
-    write_section_from_perspective, write_all_sections,
-)
-from app.seo import (
-    SEOScore, analyze_seo, SEOOptimizer,
-)
-from app.geo import (
-    GEOEnhancer, enhance_content,
-)
-from app.geo_pipeline import (
-    GEOPipeline, NicheAnalyzer, GoogleKeywordResearch,
-    PromptGenerator, KeywordTracker,
-)
+# Import STORM modules - wrap in try/except for serverless environments
+STORM_AVAILABLE = False
+GEO_PIPELINE_AVAILABLE = False
+
+try:
+    from app.analysis import (
+        StormOutline, Section, Subsection, generate_storm_analysis_prompt,
+        generate_research_queries, analyze_topic,
+    )
+    from app.research import (
+        ResearchQuery, generate_research_queries as gen_queries, prioritize_queries,
+    )
+    from app.search import (
+        GoogleSearchClient, BingSearchClient, LocalBusiness,
+        LocalLandmark, LocalMediaOutlet, CityStatistics,
+        WebSearchConfig, ResearchDataResponse, get_search_client,
+    )
+    from app.generation import (
+        SectionWriter, SectionWriterResponse, ContentAssembler,
+        write_section_from_perspective, write_all_sections,
+    )
+    from app.seo import (
+        SEOScore, analyze_seo, SEOOptimizer,
+    )
+    from app.geo import (
+        GEOEnhancer, enhance_content,
+    )
+    STORM_AVAILABLE = True
+    print("STORM modules loaded successfully")
+except ImportError as e:
+    print(f"STORM modules not available: {e}")
+
+try:
+    from app.geo_pipeline import (
+        GEOPipeline, NicheAnalyzer, GoogleKeywordResearch,
+        PromptGenerator, KeywordTracker,
+    )
+    GEO_PIPELINE_AVAILABLE = True
+    print("GEO Pipeline modules loaded successfully")
+except ImportError as e:
+    print(f"GEO Pipeline not available: {e}")
 
 # Configuration
 class Settings(BaseSettings):
@@ -651,6 +665,8 @@ async def health():
         "status": "healthy",
         "database": DB_AVAILABLE,
         "redis": REDIS_AVAILABLE,
+        "storm": STORM_AVAILABLE,
+        "geo_pipeline": GEO_PIPELINE_AVAILABLE,
         "version": settings.APP_VERSION,
     }
 
@@ -664,6 +680,8 @@ async def root():
         "status": "running",
         "database": DB_AVAILABLE,
         "redis": REDIS_AVAILABLE,
+        "storm": STORM_AVAILABLE,
+        "geo_pipeline": GEO_PIPELINE_AVAILABLE,
     }
 
 
