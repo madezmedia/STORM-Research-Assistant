@@ -27,13 +27,14 @@ dependencies = [
     "greenlet>=3.0.0",
     "aiohttp>=3.9.0",
     "mangum>=0.17.0",
-    # GEO Pipeline dependencies
-    "keybert>=0.8.0",
-    "sentence-transformers>=2.2.0",
+    # GEO Pipeline: heavy ML deps moved to [geo] extra for local development
+    # Vercel serverless falls back to TF-IDF-like extraction
 ]
 
 [project.optional-dependencies]
 geo = [
+    "keybert>=0.8.0",
+    "sentence-transformers>=2.2.0",
     "firecrawl-py>=0.0.1",
     "bertopic>=0.16.0",
 ]

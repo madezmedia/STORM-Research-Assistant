@@ -34,6 +34,6 @@ aiohttp>=3.9.0
 beautifulsoup4>=4.12.0
 markdownify>=0.11.0
 
-# GEO Pipeline
-keybert>=0.8.0
-sentence-transformers>=2.2.0
+# GEO Pipeline (lightweight - heavy ML deps removed for Vercel)
+# keybert and sentence-transformers moved to optional [geo] extra
+# The GEO pipeline falls back to TF-IDF-like extraction when KeyBERT unavailable
