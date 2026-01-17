@@ -1,41 +1,59 @@
 """
-Vercel Serverless Function Handler
-
-Minimal version to debug import issues.
+Vercel Serverless Function Handler - Ultra Minimal Debug Version
 """
 
-import sys
-import os
-from pathlib import Path
+# First, try the absolute minimum - just respond with JSON
+def handler(event, context):
+    """AWS Lambda/Vercel compatible handler"""
+    import json
 
-# Add parent directory to path for imports
-parent_dir = str(Path(__file__).parent.parent)
-sys.path.insert(0, parent_dir)
+    # Track what imports work
+    import_status = {}
 
-# Try to import the full app, fallback to minimal if it fails
-try:
-    from main import app
-    print("Main app imported successfully")
-except Exception as e:
-    print(f"Failed to import main app: {e}")
-    # Create minimal fallback app
-    from fastapi import FastAPI
-    app = FastAPI(title="STORM API (Minimal)")
+    # Test basic imports
+    try:
+        import sys
+        import_status["sys"] = "ok"
+    except Exception as e:
+        import_status["sys"] = str(e)
 
-    @app.get("/")
-    def root():
-        return {"status": "minimal", "error": str(e)}
+    try:
+        from pathlib import Path
+        import_status["pathlib"] = "ok"
+    except Exception as e:
+        import_status["pathlib"] = str(e)
 
-    @app.get("/health")
-    def health():
-        return {"status": "healthy", "mode": "minimal", "import_error": str(e)}
+    # Test FastAPI
+    try:
+        from fastapi import FastAPI
+        import_status["fastapi"] = "ok"
+    except Exception as e:
+        import_status["fastapi"] = str(e)
 
-# Import Mangum
-try:
-    from mangum import Mangum
-    handler = Mangum(app, lifespan="off")
-    print("Mangum handler created")
-except Exception as e:
-    print(f"Failed to create Mangum handler: {e}")
-    # Try without Mangum
-    handler = app
+    # Test Mangum
+    try:
+        from mangum import Mangum
+        import_status["mangum"] = "ok"
+    except Exception as e:
+        import_status["mangum"] = str(e)
+
+    # Test main app
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from main import app
+        import_status["main"] = "ok"
+    except Exception as e:
+        import_status["main"] = str(e)
+
+    # Return JSON response
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({
+            "status": "debug",
+            "imports": import_status,
+            "path": event.get("path", "unknown")
+        })
+    }
