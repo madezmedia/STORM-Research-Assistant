@@ -5,6 +5,8 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2.6+-green.svg)](https://langchain-ai.github.io/langgraph/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Next.js](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
+[![Vercel AI SDK](https://img.shields.io/badge/Vercel%20AI%20SDK-blue.svg)](https://sdk.vercel.ai/docs)
 
 > **STORM** (Synthesis of Topic Outlines through Retrieval and Multi-perspective Question Asking) - A writing system for generating grounded and organized long-form articles from scratch, with comparable breadth and depth to Wikipedia pages
 
@@ -23,13 +25,14 @@ STORM Research Assistant is a LangGraph-based implementation of the STORM method
 - **🔄 User Feedback Integration**: Human-in-the-loop capability for refining analyst perspectives
 - **⚡ Parallel Processing**: Simultaneous execution of multiple perspective interviews for efficiency
 - **🎨 LangGraph Studio Support**: Full integration with LangGraph Studio for visual debugging
+- **🌐 Web Frontend**: Next.js + Vercel AI SDK frontend for interactive research experience
 
 ## 🏗️ Architecture
 
 ### System Structure
 
 ```
-📁 src/storm_research/
+📁 src/storm_research/          # Python LangGraph backend
 ├── 📄 __init__.py          # Package initialization
 ├── 🧠 graph.py            # LangGraph graph definition (main logic)
 ├── 📊 state.py            # State and data model definitions
@@ -37,9 +40,22 @@ STORM Research Assistant is a LangGraph-based implementation of the STORM method
 ├── ⚙️ configuration.py     # System configuration management
 ├── 🔧 tools.py            # Search tool implementations
 └── 🛠️ utils.py            # Utility functions
+
+📁 frontend/                   # Next.js + Vercel AI SDK frontend
+├── 📄 package.json         # Frontend dependencies
+├── 📄 tsconfig.json        # TypeScript configuration
+├── 📄 next.config.js       # Next.js configuration
+├── 📄 tailwind.config.ts   # Tailwind CSS configuration
+├── 📁 app/                # Next.js app directory
+│   ├── 📄 layout.tsx       # Root layout
+│   ├── 📄 page.tsx         # Main research interface
+│   └── 📄 globals.css       # Global styles
+├── 📁 lib/                # Utility functions
+│   └── 📄 utils.ts          # Frontend utilities
+└── 📄 .env.local.example    # Environment variables template
 ```
 
-### Workflow
+### Backend Workflow
 
 ```mermaid
 graph TD
@@ -66,6 +82,22 @@ graph TD
     M --> N[End]
 ```
 
+### Frontend Architecture
+
+```mermaid
+graph LR
+    A[Next.js Frontend] --> B[Vercel AI SDK]
+    B --> C[LangSmithDeploymentTransport]
+    C --> D[LangGraph Backend]
+    D --> E[Python LLM Providers]
+    E --> F[OpenAI]
+    E --> G[Anthropic]
+    E --> H[Azure OpenAI]
+    D --> I[Search Tools]
+    I --> J[Tavily Web Search]
+    I --> K[ArXiv Papers]
+```
+
 ## 🚀 Installation & Setup
 
 ### Prerequisites
@@ -80,6 +112,22 @@ graph TD
 git clone https://github.com/teddynote-lab/STORM-Research-Assistant.git
 cd STORM-Research-Assistant
 ```
+
+### 1.5. Quick Setup (Recommended)
+
+Run the setup script to configure both backend and frontend:
+
+```bash
+./scripts/setup.sh
+```
+
+This script will:
+- Create Python virtual environment
+- Install all Python dependencies
+- Install all Node.js dependencies
+- Create `.env` and `.env.local` files from templates
+
+Then configure your API keys in `.env` file and continue with steps 2-4 below.
 
 ### 2. Environment Setup
 
@@ -117,6 +165,15 @@ ANTHROPIC_API_KEY=your_anthropic_api_key
 # Azure OpenAI
 AZURE_OPENAI_API_KEY=your_azure_openai_api_key
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+
+# Frontend Environment Variables (optional)
+# Create frontend/.env.local from frontend/.env.local.example
+
+# LangGraph Backend URL
+NEXT_PUBLIC_LANGGRAPH_URL=http://localhost:2024
+
+# Optional: LangSmith API Key (for deployed instances)
+# NEXT_PUBLIC_LANGSMITH_API_KEY=your_langsmith_api_key
 ```
 
 ### 4. Running LangGraph Studio
@@ -130,6 +187,23 @@ uv run langgraph dev
 ```
 
 Access the studio at `http://localhost:2024`
+
+### 5. Running the Frontend (Optional)
+
+```bash
+cd frontend
+
+# Install dependencies (first time)
+npm install
+
+# Create environment file
+cp .env.local.example .env.local
+
+# Start development server
+npm run dev
+```
+
+Access the frontend at `http://localhost:3000`
 
 ## 📝 Usage
 
@@ -234,6 +308,30 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
   - The methodology addresses challenges in pre-writing stages including topic research and outline preparation
 - Built with [LangGraph](https://langchain-ai.github.io/langgraph/) and [LangChain](https://python.langchain.com/)
 - LangChain YouTube Channel: [Building STORM from scratch with LangGraph](https://youtu.be/1uUORSZwTz4?si=4RrM3UIuwwdWKFET)
+
+## 🌐 Web Frontend
+
+The project includes a Next.js frontend built with Vercel AI SDK that provides an interactive web interface for the STORM Research Assistant.
+
+### Frontend Features
+
+- **🎨 Modern UI**: Clean, responsive interface built with Tailwind CSS
+- **⚡ Real-time Streaming**: Live updates as research progresses
+- **🔧 Configuration Panel**: Easy setup for research parameters
+- **💬 Interactive Chat**: Provide feedback and refine research direction
+- **🎯 Model Selection**: Choose from multiple LLM providers
+
+### Frontend Tech Stack
+
+- **Next.js 15**: React framework with App Router
+- **Vercel AI SDK**: AI integration with streaming support
+- **LangSmithDeploymentTransport**: Direct connection to LangGraph backend
+- **Tailwind CSS**: Utility-first CSS framework
+- **TypeScript**: Type-safe development
+
+### Frontend Setup
+
+See [`frontend/README.md`](frontend/README.md) for detailed frontend setup instructions.
 
 ## 📞 Support
 
