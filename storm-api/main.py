@@ -32,12 +32,49 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql.expression import func
 
 import httpx
-import redis.asyncio as redis
-from google.generativeai import GenerativeModel
-from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
-from bs4 import BeautifulSoup
-import markdownify
+
+# Optional imports - wrap in try/except for serverless
+try:
+    import redis.asyncio as redis
+    REDIS_IMPORT_OK = True
+except ImportError as e:
+    print(f"Redis import failed: {e}")
+    redis = None
+    REDIS_IMPORT_OK = False
+
+try:
+    from google.generativeai import GenerativeModel
+    GOOGLE_IMPORT_OK = True
+except ImportError as e:
+    print(f"Google AI import failed: {e}")
+    GenerativeModel = None
+    GOOGLE_IMPORT_OK = False
+
+try:
+    from openai import AsyncOpenAI
+    OPENAI_IMPORT_OK = True
+except ImportError as e:
+    print(f"OpenAI import failed: {e}")
+    AsyncOpenAI = None
+    OPENAI_IMPORT_OK = False
+
+try:
+    from anthropic import AsyncAnthropic
+    ANTHROPIC_IMPORT_OK = True
+except ImportError as e:
+    print(f"Anthropic import failed: {e}")
+    AsyncAnthropic = None
+    ANTHROPIC_IMPORT_OK = False
+
+try:
+    from bs4 import BeautifulSoup
+    import markdownify
+    BS4_IMPORT_OK = True
+except ImportError as e:
+    print(f"BeautifulSoup/markdownify import failed: {e}")
+    BeautifulSoup = None
+    markdownify = None
+    BS4_IMPORT_OK = False
 
 # Import STORM modules - wrap in try/except for serverless environments
 STORM_AVAILABLE = False
@@ -138,14 +175,17 @@ except Exception as e:
 REDIS_AVAILABLE = False
 redis_client = None
 
-try:
-    # Only connect if REDIS_URL is set and not the default localhost
-    if settings.REDIS_URL and settings.REDIS_URL != "redis://localhost:6379/0":
-        redis_client = redis.from_url(str(settings.REDIS_URL), decode_responses=True)
-        REDIS_AVAILABLE = True
-        print("Redis connection configured")
-except Exception as e:
-    print(f"Redis not available: {e}")
+if REDIS_IMPORT_OK and redis is not None:
+    try:
+        # Only connect if REDIS_URL is set and not the default localhost
+        if settings.REDIS_URL and settings.REDIS_URL != "redis://localhost:6379/0":
+            redis_client = redis.from_url(str(settings.REDIS_URL), decode_responses=True)
+            REDIS_AVAILABLE = True
+            print("Redis connection configured")
+    except Exception as e:
+        print(f"Redis not available: {e}")
+else:
+    print("Redis import not available, skipping connection")
 
 # FastAPI app
 app = FastAPI(
