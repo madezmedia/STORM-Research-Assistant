@@ -102,13 +102,36 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Database
-engine = create_async_engine(str(settings.DATABASE_URL))
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# Base must be defined before models
 Base = declarative_base()
 
-# Redis
-redis_client = redis.from_url(str(settings.REDIS_URL), decode_responses=True)
+# Database - make optional for serverless environments
+DB_AVAILABLE = False
+engine = None
+async_session = None
+
+try:
+    # Only connect if DATABASE_URL is set and not the default localhost
+    if settings.DATABASE_URL and settings.DATABASE_URL != "postgresql+asyncpg://user:password@localhost:5432/storm_db":
+        engine = create_async_engine(str(settings.DATABASE_URL))
+        async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        DB_AVAILABLE = True
+        print("Database connection configured")
+except Exception as e:
+    print(f"Database not available: {e}")
+
+# Redis - make optional for serverless environments
+REDIS_AVAILABLE = False
+redis_client = None
+
+try:
+    # Only connect if REDIS_URL is set and not the default localhost
+    if settings.REDIS_URL and settings.REDIS_URL != "redis://localhost:6379/0":
+        redis_client = redis.from_url(str(settings.REDIS_URL), decode_responses=True)
+        REDIS_AVAILABLE = True
+        print("Redis connection configured")
+except Exception as e:
+    print(f"Redis not available: {e}")
 
 # FastAPI app
 app = FastAPI(
@@ -619,6 +642,29 @@ async def get_current_user() -> dict:
 
 
 # ====================== API Endpoints ======================
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint - works without database/redis"""
+    return {
+        "status": "healthy",
+        "database": DB_AVAILABLE,
+        "redis": REDIS_AVAILABLE,
+        "version": settings.APP_VERSION,
+    }
+
+
+@app.get("/")
+async def root():
+    """Root endpoint with API info"""
+    return {
+        "name": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "running",
+        "database": DB_AVAILABLE,
+        "redis": REDIS_AVAILABLE,
+    }
 
 
 @app.post("/api/v1/briefs", response_model=ContentBriefResponse, status_code=201)
