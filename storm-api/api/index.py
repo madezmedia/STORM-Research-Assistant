@@ -665,3 +665,441 @@ async def get_generated_content(brief_id: str):
         raise HTTPException(status_code=404, detail="Content not found")
 
     return content_store[brief_id]
+
+
+# =============================================================================
+# Slideshow/Video Generation Endpoints
+# =============================================================================
+
+# Import slideshow modules
+import sys
+from pathlib import Path
+
+# Add app directory to path for imports
+app_dir = Path(__file__).parent.parent / "app"
+if str(app_dir) not in sys.path:
+    sys.path.insert(0, str(app_dir))
+
+# Import slideshow modules
+try:
+    from image_generation import (
+        ImageGenerationClient,
+        SlideGenerationOptions,
+        generate_slideshow_content,
+        extract_slides_from_content,
+        generate_all_slide_images
+    )
+    from slideshow_generator import (
+        SlideshowOptions,
+        generate_html_slideshow,
+        generate_embed_code
+    )
+    from video_generator import (
+        VideoOptions,
+        VideoGenerator,
+        generate_video_from_slides,
+        check_ffmpeg,
+        is_ffmpeg_available
+    )
+    SLIDESHOW_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"Slideshow modules not available: {e}")
+    SLIDESHOW_MODULES_AVAILABLE = False
+
+
+# Extended Settings for Z.AI
+class SlideshowSettings(BaseSettings):
+    ZAI_API_KEY: str = ""
+    ZAI_API_URL: str = "https://api.z.ai/api/paas/v4"
+    GLM_IMAGE_MODEL: str = "glm-image"
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
+
+slideshow_settings = SlideshowSettings()
+
+
+# Slideshow Request Models
+class SlideGenerationRequest(BaseModel):
+    """Request to generate slides from content"""
+    content: str = Field(..., description="Blog post or article content")
+    max_slides: int = Field(default=10, ge=1, le=20)
+    style: str = Field(default="professional")  # professional, minimalist, vibrant
+    brand_colors: Optional[Dict[str, str]] = None  # {primary: "#hex", secondary: "#hex"}
+    include_title_slide: bool = True
+    include_conclusion_slide: bool = True
+    generate_images: bool = True  # Set False for text-only slides
+
+
+class SlideshowGenerationRequest(BaseModel):
+    """Request to generate HTML slideshow"""
+    content: str = Field(..., description="Blog post or article content")
+    max_slides: int = Field(default=10, ge=1, le=20)
+    style: str = Field(default="professional")
+    autoplay: bool = True
+    duration: int = Field(default=5, ge=1, le=30)  # seconds per slide
+    transition: str = Field(default="fade")  # fade, slide, zoom
+    show_controls: bool = True
+    loop: bool = True
+    theme: str = Field(default="dark")  # dark, light
+    title: str = Field(default="Presentation")
+    generate_images: bool = True
+
+
+class VideoGenerationRequest(BaseModel):
+    """Request to generate video from content"""
+    content: str = Field(..., description="Blog post or article content")
+    max_slides: int = Field(default=10, ge=1, le=20)
+    style: str = Field(default="professional")
+    duration: int = Field(default=5, ge=1, le=30)  # seconds per slide
+    resolution: str = Field(default="1080p")  # 720p, 1080p, 4k
+    transition: str = Field(default="fade")
+    audio_path: Optional[str] = None
+
+
+# In-memory storage for slideshow jobs
+slideshow_jobs: Dict[str, Any] = {}
+
+
+@app.get("/api/v1/slides/status")
+async def get_slideshow_status():
+    """Check slideshow generation capabilities"""
+    ffmpeg_status = check_ffmpeg() if SLIDESHOW_MODULES_AVAILABLE else {"available": False}
+
+    return {
+        "modules_available": SLIDESHOW_MODULES_AVAILABLE,
+        "ffmpeg": ffmpeg_status,
+        "zai_configured": bool(slideshow_settings.ZAI_API_KEY),
+        "gateway_configured": bool(settings.OPENAI_API_KEY),
+        "supported_formats": ["slides", "slideshow", "video"] if SLIDESHOW_MODULES_AVAILABLE else []
+    }
+
+
+@app.post("/api/v1/slides/generate")
+async def generate_slides(request: SlideGenerationRequest):
+    """
+    Generate slides from content using AI.
+
+    Extracts key points and generates visual slides with optional images.
+    Uses Z.AI GLM-Image for image generation, with DALL-E 3 fallback.
+    """
+    if not SLIDESHOW_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Slideshow modules not available. Check server logs."
+        )
+
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail="API key not configured. Set OPENAI_API_KEY in environment."
+        )
+
+    try:
+        # Create options
+        options = SlideGenerationOptions(
+            max_slides=request.max_slides,
+            style=request.style,
+            brand_colors=request.brand_colors,
+            include_title_slide=request.include_title_slide,
+            include_conclusion_slide=request.include_conclusion_slide
+        )
+
+        # Generate slideshow content
+        result = await generate_slideshow_content(
+            api_key=settings.OPENAI_API_KEY,
+            content=request.content,
+            options=options,
+            gateway_url=settings.VERCEL_AI_GATEWAY_URL,
+            generate_images=request.generate_images
+        )
+
+        # Store job for retrieval
+        job_id = str(uuid.uuid4())
+        slideshow_jobs[job_id] = {
+            "id": job_id,
+            "type": "slides",
+            "status": "complete",
+            "result": result,
+            "created_at": datetime.now().isoformat()
+        }
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "slide_count": result.get("slide_count", 0),
+            "style": result.get("style"),
+            "slides": result.get("slides", [])
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Slide generation failed: {str(e)}"
+        )
+
+
+@app.post("/api/v1/slides/slideshow")
+async def generate_slideshow(request: SlideshowGenerationRequest):
+    """
+    Generate a self-contained HTML slideshow from content.
+
+    Returns HTML that can be embedded or saved as a standalone file.
+    Includes autoplay, transitions, keyboard controls, and responsive design.
+    """
+    if not SLIDESHOW_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Slideshow modules not available. Check server logs."
+        )
+
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail="API key not configured. Set OPENAI_API_KEY in environment."
+        )
+
+    try:
+        # Step 1: Generate slides
+        slide_options = SlideGenerationOptions(
+            max_slides=request.max_slides,
+            style=request.style,
+            include_title_slide=True,
+            include_conclusion_slide=True
+        )
+
+        slides_result = await generate_slideshow_content(
+            api_key=settings.OPENAI_API_KEY,
+            content=request.content,
+            options=slide_options,
+            gateway_url=settings.VERCEL_AI_GATEWAY_URL,
+            generate_images=request.generate_images
+        )
+
+        slides = slides_result.get("slides", [])
+
+        if not slides:
+            raise HTTPException(
+                status_code=500,
+                detail="No slides generated from content"
+            )
+
+        # Step 2: Generate HTML slideshow
+        slideshow_options = SlideshowOptions(
+            autoplay=request.autoplay,
+            duration=request.duration,
+            transition=request.transition,
+            show_controls=request.show_controls,
+            show_progress=True,
+            loop=request.loop,
+            theme=request.theme
+        )
+
+        html_content = generate_html_slideshow(
+            slides=slides,
+            options=slideshow_options,
+            title=request.title
+        )
+
+        # Store job
+        job_id = str(uuid.uuid4())
+        slideshow_jobs[job_id] = {
+            "id": job_id,
+            "type": "slideshow",
+            "status": "complete",
+            "html": html_content,
+            "slide_count": len(slides),
+            "created_at": datetime.now().isoformat()
+        }
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "slide_count": len(slides),
+            "format": "html",
+            "html": html_content,
+            "embed_code": f'<iframe src="/api/v1/slides/{job_id}/embed" width="800" height="450" frameborder="0" allowfullscreen></iframe>'
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Slideshow generation failed: {str(e)}"
+        )
+
+
+@app.post("/api/v1/slides/video")
+async def generate_video(request: VideoGenerationRequest):
+    """
+    Generate a video from content slides using FFmpeg.
+
+    NOTE: This endpoint requires FFmpeg to be installed on the server.
+    Not available on Vercel serverless - use for local/VPS deployments.
+    """
+    if not SLIDESHOW_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Slideshow modules not available. Check server logs."
+        )
+
+    if not is_ffmpeg_available():
+        return {
+            "success": False,
+            "error": "FFmpeg is not installed on this server",
+            "help": "Video generation requires FFmpeg. Install with: brew install ffmpeg (macOS) or apt install ffmpeg (Linux)",
+            "alternative": "Use /api/v1/slides/slideshow to generate an HTML slideshow instead"
+        }
+
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail="API key not configured. Set OPENAI_API_KEY in environment."
+        )
+
+    try:
+        # Step 1: Generate slides with images
+        slide_options = SlideGenerationOptions(
+            max_slides=request.max_slides,
+            style=request.style,
+            include_title_slide=True,
+            include_conclusion_slide=True
+        )
+
+        slides_result = await generate_slideshow_content(
+            api_key=settings.OPENAI_API_KEY,
+            content=request.content,
+            options=slide_options,
+            gateway_url=settings.VERCEL_AI_GATEWAY_URL,
+            generate_images=True  # Required for video
+        )
+
+        slides = slides_result.get("slides", [])
+
+        if not slides:
+            raise HTTPException(
+                status_code=500,
+                detail="No slides generated from content"
+            )
+
+        # Step 2: Generate video
+        import tempfile
+        output_path = tempfile.mktemp(suffix=".mp4")
+
+        video_result = await generate_video_from_slides(
+            slides=slides,
+            output_path=output_path,
+            duration=request.duration,
+            resolution=request.resolution,
+            transition=request.transition,
+            audio_path=request.audio_path
+        )
+
+        if not video_result.get("success"):
+            raise HTTPException(
+                status_code=500,
+                detail=video_result.get("error", "Video generation failed")
+            )
+
+        # Read video file and encode as base64
+        import base64
+        video_data = None
+        if os.path.exists(output_path):
+            with open(output_path, "rb") as f:
+                video_data = base64.b64encode(f.read()).decode("utf-8")
+            os.remove(output_path)
+
+        # Store job
+        job_id = str(uuid.uuid4())
+        slideshow_jobs[job_id] = {
+            "id": job_id,
+            "type": "video",
+            "status": "complete",
+            "video_data": video_data,
+            "duration_seconds": video_result.get("duration_seconds"),
+            "resolution": video_result.get("resolution"),
+            "slide_count": len(slides),
+            "created_at": datetime.now().isoformat()
+        }
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "slide_count": len(slides),
+            "format": "mp4",
+            "duration_seconds": video_result.get("duration_seconds"),
+            "resolution": video_result.get("resolution"),
+            "file_size_bytes": video_result.get("file_size_bytes"),
+            "video_base64": video_data
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Video generation failed: {str(e)}"
+        )
+
+
+@app.get("/api/v1/slides/{job_id}")
+async def get_slideshow_job(job_id: str):
+    """Get the result of a slideshow generation job"""
+    if job_id not in slideshow_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = slideshow_jobs[job_id]
+
+    # Return appropriate response based on job type
+    if job["type"] == "slides":
+        return {
+            "id": job["id"],
+            "type": job["type"],
+            "status": job["status"],
+            "slides": job.get("result", {}).get("slides", []),
+            "slide_count": job.get("result", {}).get("slide_count", 0),
+            "created_at": job["created_at"]
+        }
+    elif job["type"] == "slideshow":
+        return {
+            "id": job["id"],
+            "type": job["type"],
+            "status": job["status"],
+            "html": job.get("html"),
+            "slide_count": job.get("slide_count", 0),
+            "created_at": job["created_at"]
+        }
+    elif job["type"] == "video":
+        return {
+            "id": job["id"],
+            "type": job["type"],
+            "status": job["status"],
+            "video_base64": job.get("video_data"),
+            "duration_seconds": job.get("duration_seconds"),
+            "resolution": job.get("resolution"),
+            "slide_count": job.get("slide_count", 0),
+            "created_at": job["created_at"]
+        }
+
+    return job
+
+
+@app.get("/api/v1/slides/{job_id}/embed")
+async def get_slideshow_embed(job_id: str):
+    """Get embeddable HTML for a slideshow job"""
+    from fastapi.responses import HTMLResponse
+
+    if job_id not in slideshow_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = slideshow_jobs[job_id]
+
+    if job["type"] != "slideshow":
+        raise HTTPException(
+            status_code=400,
+            detail="This job is not a slideshow. Use /api/v1/slides/{job_id} to get raw data."
+        )
+
+    return HTMLResponse(content=job.get("html", ""), media_type="text/html")
