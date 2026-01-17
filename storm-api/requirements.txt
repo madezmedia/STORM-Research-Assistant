@@ -1,8 +1,7 @@
 # Minimal requirements for Vercel debugging
-# Testing if basic function works
+# Vercel Python handles ASGI natively - no Mangum needed
 
 fastapi>=0.104.0
-mangum>=0.17.0
 
 # # Full requirements (uncomment after debug):
 # pydantic>=2.5.0

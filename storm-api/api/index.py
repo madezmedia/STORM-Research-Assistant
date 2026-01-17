@@ -1,20 +1,19 @@
 """
-Vercel Serverless Function Handler - Minimal Test
+Vercel Serverless Function Handler
+
+For Vercel Python, just export the FastAPI app directly.
+Vercel's runtime handles ASGI natively without Mangum.
 """
 
 from fastapi import FastAPI
-from mangum import Mangum
 
 # Create minimal FastAPI app
-app = FastAPI(title="STORM API Debug")
+app = FastAPI(title="STORM API")
 
 @app.get("/")
 def root():
-    return {"status": "running", "mode": "minimal_debug"}
+    return {"status": "running", "mode": "minimal"}
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "mode": "minimal_debug"}
-
-# Mangum handler for Vercel
-handler = Mangum(app, lifespan="off")
+    return {"status": "healthy", "mode": "minimal"}
