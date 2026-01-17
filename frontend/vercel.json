@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm install",
+  "devCommand": "npm run dev",
+  "env": {
+    "STORM_API_URL": "https://storm-api.vercel.app"
+  }
+}

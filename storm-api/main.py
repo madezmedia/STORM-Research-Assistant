@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "STORM Content Generation API"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,https://storm-research.vercel.app,https://madezmedia.co,https://sonicbrand-ai.vercel.app,https://ezinfluencer360.com"
     WEBHOOK_SECRET: str = ""
     RATE_LIMIT_PER_MINUTE: int = 60
     SESSION_SECRET: str = ""
@@ -113,10 +113,11 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS
+# CORS - Parse comma-separated origins from settings
+cors_origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
