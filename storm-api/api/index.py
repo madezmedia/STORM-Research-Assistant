@@ -134,17 +134,63 @@ class STORMTestResponse(BaseModel):
     outline: Dict[str, Any]
     sample_content: str
 
+async def call_llm(prompt: str, model: str = None, max_tokens: int = 1000) -> str:
+    """Helper function to call Vercel AI Gateway"""
+    model = model or settings.DEFAULT_MODEL
+
+    if not settings.OPENAI_API_KEY:
+        return None
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.VERCEL_AI_GATEWAY_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens
+                },
+                timeout=60.0
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"LLM call failed: {e}")
+
+    return None
+
+
 @app.post("/api/v1/test-storm", response_model=STORMTestResponse)
 async def test_storm(request: STORMTestRequest):
-    """Test STORM analysis with a simple topic"""
+    """Test STORM analysis with a simple topic - uses Vercel AI Gateway if configured"""
 
-    # Generate mock perspectives
-    perspectives = [
-        f"Expert {i+1} perspective on {request.topic}"
-        for i in range(request.perspectives)
-    ]
+    # Try to use LLM for perspectives
+    llm_perspectives = None
+    if settings.OPENAI_API_KEY:
+        perspective_prompt = f"""Generate {request.perspectives} expert perspectives on the topic: "{request.topic}"
 
-    # Generate mock outline
+For each perspective, provide a unique viewpoint from a different domain expert (e.g., industry analyst, academic researcher, practitioner, etc.)
+
+Format as a numbered list with perspective title and brief description."""
+
+        llm_perspectives = await call_llm(perspective_prompt, max_tokens=500)
+
+    # Parse LLM perspectives or use fallback
+    if llm_perspectives:
+        perspectives = [line.strip() for line in llm_perspectives.split('\n') if line.strip() and line.strip()[0].isdigit()][:request.perspectives]
+    else:
+        perspectives = [
+            f"Expert {i+1} perspective on {request.topic}"
+            for i in range(request.perspectives)
+        ]
+
+    # Generate outline
     outline = {
         "title": f"Comprehensive Guide to {request.topic}",
         "sections": [
@@ -155,12 +201,31 @@ async def test_storm(request: STORMTestRequest):
         ]
     }
 
-    # Generate sample content
-    sample_content = f"""# Comprehensive Guide to {request.topic}
+    # Try to generate real content using LLM
+    sample_content = None
+    if settings.OPENAI_API_KEY:
+        content_prompt = f"""Write a comprehensive article about: "{request.topic}"
+
+Structure the article with:
+1. Introduction - Overview and why this topic matters
+2. Key Concepts - Explain the fundamentals
+3. Analysis - Current state and emerging trends
+4. Conclusion - Summary and actionable recommendations
+
+Make it informative, engaging, and approximately 800 words.
+Use markdown formatting with ## headings."""
+
+        sample_content = await call_llm(content_prompt, max_tokens=2000)
+
+    # Fallback content if LLM not available
+    if not sample_content:
+        sample_content = f"""# Comprehensive Guide to {request.topic}
 
 ## Introduction
 
 This guide provides an in-depth analysis of {request.topic}, examining it from {request.perspectives} different perspectives.
+
+*Note: Configure OPENAI_API_KEY in Vercel environment variables to enable AI-powered content generation.*
 
 ## Key Concepts
 
