@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 
 interface GenerationStatus {
   brief_id: string;
@@ -28,10 +28,12 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [generationStatus, setGenerationStatus] = useState<GenerationStatus | null>(null);
   const [briefId, setBriefId] = useState<string | null>(null);
+  const messageIdCounter = useRef(0);
 
   const addMessage = (role: 'user' | 'assistant', content: string) => {
+    messageIdCounter.current += 1;
     setMessages(prev => [...prev, {
-      id: Date.now().toString(),
+      id: `msg-${messageIdCounter.current}-${Date.now()}`,
       role,
       content,
       timestamp: new Date()
