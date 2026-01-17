@@ -3,10 +3,10 @@
 <!-- Project badges -->
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-0.2.6+-green.svg)](https://langchain-ai.github.io/langgraph/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
+[![Vercel AI Gateway](https://img.shields.io/badge/Vercel%20AI%20Gateway-black.svg)](https://vercel.com/docs/ai-gateway)
 [![Next.js](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
-[![Vercel AI SDK](https://img.shields.io/badge/Vercel%20AI%20SDK-blue.svg)](https://sdk.vercel.ai/docs)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 > **STORM** (Synthesis of Topic Outlines through Retrieval and Multi-perspective Question Asking) - A writing system for generating grounded and organized long-form articles from scratch, with comparable breadth and depth to Wikipedia pages
 
@@ -32,27 +32,33 @@ STORM Research Assistant is a LangGraph-based implementation of the STORM method
 ### System Structure
 
 ```
-📁 src/storm_research/          # Python LangGraph backend
-├── 📄 __init__.py          # Package initialization
-├── 🧠 graph.py            # LangGraph graph definition (main logic)
-├── 📊 state.py            # State and data model definitions
-├── 💬 prompts.py          # Prompt templates
-├── ⚙️ configuration.py     # System configuration management
-├── 🔧 tools.py            # Search tool implementations
-└── 🛠️ utils.py            # Utility functions
+📁 storm-api/                  # FastAPI Content Generation API
+├── 📄 main.py              # FastAPI application & endpoints
+├── 📁 app/                 # Core modules
+│   ├── 🧠 llm.py           # Vercel AI Gateway client
+│   ├── 📊 analysis.py      # STORM 7-perspective analysis
+│   ├── ✏️ generation.py    # Content generation engine
+│   ├── 🔍 research.py      # Research query generator
+│   ├── 🌐 search.py        # Web search & local data
+│   ├── 📈 seo.py           # SEO optimizer
+│   └── 📍 geo.py           # GEO enhancer
+├── 📁 migrations/          # Alembic database migrations
+└── 📄 pyproject.toml       # Dependencies & config
 
 📁 frontend/                   # Next.js + Vercel AI SDK frontend
 ├── 📄 package.json         # Frontend dependencies
-├── 📄 tsconfig.json        # TypeScript configuration
-├── 📄 next.config.js       # Next.js configuration
-├── 📄 tailwind.config.ts   # Tailwind CSS configuration
-├── 📁 app/                # Next.js app directory
+├── 📁 app/                 # Next.js app directory
 │   ├── 📄 layout.tsx       # Root layout
-│   ├── 📄 page.tsx         # Main research interface
-│   └── 📄 globals.css       # Global styles
-├── 📁 lib/                # Utility functions
-│   └── 📄 utils.ts          # Frontend utilities
-└── 📄 .env.local.example    # Environment variables template
+│   ├── 📄 page.tsx         # Main interface
+│   └── 📄 globals.css      # Global styles
+├── 📁 components/          # UI components
+└── 📄 .env.local.example   # Environment variables template
+
+📁 src/storm_research/         # LangGraph backend (optional)
+├── 🧠 graph.py             # LangGraph graph definition
+├── 📊 state.py             # State definitions
+├── 💬 prompts.py           # Prompt templates
+└── 🔧 tools.py             # Search tools
 ```
 
 ### Backend Workflow
@@ -82,20 +88,32 @@ graph TD
     M --> N[End]
 ```
 
-### Frontend Architecture
+### API Architecture
 
 ```mermaid
 graph LR
-    A[Next.js Frontend] --> B[Vercel AI SDK]
-    B --> C[LangSmithDeploymentTransport]
-    C --> D[LangGraph Backend]
-    D --> E[Python LLM Providers]
-    E --> F[OpenAI]
-    E --> G[Anthropic]
-    E --> H[Azure OpenAI]
-    D --> I[Search Tools]
-    I --> J[Tavily Web Search]
-    I --> K[ArXiv Papers]
+    A[Next.js Frontend] --> B[FastAPI storm-api]
+    B --> C[Vercel AI Gateway]
+    C --> D[xai/grok-4.1]
+    C --> E[openai/gpt-4o]
+    C --> F[anthropic/claude]
+    B --> G[PostgreSQL]
+    B --> H[Redis]
+    B --> I[Web Search APIs]
+```
+
+### Content Generation Pipeline
+
+```mermaid
+graph TD
+    A[Create Brief] --> B[STORM Analysis]
+    B --> C[7-Perspective Outline]
+    C --> D[Research Query Generation]
+    D --> E[Web Search & Local Data]
+    E --> F[Parallel Section Writing]
+    F --> G[SEO Optimization]
+    G --> H[GEO Enhancement]
+    H --> I[Final Content Assembly]
 ```
 
 ## 🚀 Installation & Setup
@@ -104,96 +122,66 @@ graph LR
 
 - Python 3.11 or higher
 - [uv](https://github.com/astral-sh/uv) package manager
-- API keys for chosen LLM providers
+- PostgreSQL database (Supabase or Vercel Postgres)
+- Redis (Redis Labs or Vercel KV)
+- Vercel AI Gateway API key
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/teddynote-lab/STORM-Research-Assistant.git
+git clone https://github.com/madezmedia/STORM-Research-Assistant.git
 cd STORM-Research-Assistant
 ```
 
-### 1.5. Quick Setup (Recommended)
-
-Run the setup script to configure both backend and frontend:
+### 2. Setup Storm API (Backend)
 
 ```bash
-./scripts/setup.sh
-```
+cd storm-api
 
-This script will:
-- Create Python virtual environment
-- Install all Python dependencies
-- Install all Node.js dependencies
-- Create `.env` and `.env.local` files from templates
-
-Then configure your API keys in `.env` file and continue with steps 2-4 below.
-
-### 2. Environment Setup
-
-```bash
-# Create virtual environment using uv
+# Create virtual environment
 uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 
 # Install dependencies
 uv pip install -e .
 
-# Install development dependencies
-uv pip install -e ".[dev]"
+# Configure environment
+cp .env.example .env
+# Edit .env with your credentials
+
+# Run database migrations
+uv run alembic upgrade head
+
+# Start the server
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3. Environment Variables
-
-Create a `.env` file in the root directory and configure the following API keys:
+### 3. Environment Variables (storm-api/.env)
 
 ```env
-# LangSmith for tracing
-LANGSMITH_PROJECT=STORM-Research-Assistant
-LANGSMITH_API_KEY=your_langsmith_api_key
+# Database (Supabase/Vercel Postgres)
+DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/db
 
-# Required API Keys
-TAVILY_API_KEY=your_tavily_api_key
+# Redis (Redis Labs/Vercel KV)
+REDIS_URL=redis://default:pass@host:port
 
-# LLM Provider API Keys (choose one or more)
-# OpenAI
-OPENAI_API_KEY=your_openai_api_key
+# Vercel AI Gateway (required)
+OPENAI_API_KEY=vck_your_vercel_ai_gateway_key
+VERCEL_AI_GATEWAY_URL=https://ai-gateway.vercel.sh/v1
+DEFAULT_MODEL=xai/grok-4.1-fast-reasoning
 
-# Anthropic
-ANTHROPIC_API_KEY=your_anthropic_api_key
-
-# Azure OpenAI
-AZURE_OPENAI_API_KEY=your_azure_openai_api_key
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-
-# Frontend Environment Variables (optional)
-# Create frontend/.env.local from frontend/.env.local.example
-
-# LangGraph Backend URL
-NEXT_PUBLIC_LANGGRAPH_URL=http://localhost:2024
-
-# Optional: LangSmith API Key (for deployed instances)
-# NEXT_PUBLIC_LANGSMITH_API_KEY=your_langsmith_api_key
+# Search APIs (optional)
+GOOGLE_SEARCH_API_KEY=your_google_search_key
+GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
+BING_SEARCH_API_KEY=your_bing_key
 ```
 
-### 4. Running LangGraph Studio
-
-```bash
-# Install LangGraph CLI (one-time setup)
-pip install "langgraph-cli[inmem]"
-
-# Run LangGraph Studio
-uv run langgraph dev
-```
-
-Access the studio at `http://localhost:2024`
-
-### 5. Running the Frontend (Optional)
+### 4. Setup Frontend (Optional)
 
 ```bash
 cd frontend
 
-# Install dependencies (first time)
+# Install dependencies
 npm install
 
 # Create environment file
@@ -205,96 +193,118 @@ npm run dev
 
 Access the frontend at `http://localhost:3000`
 
+### 5. Verify Installation
+
+```bash
+# Test LLM connection
+curl -X POST http://localhost:8000/api/v1/test-llm \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Hello"}'
+
+# Test STORM analysis
+curl -X POST http://localhost:8000/api/v1/test-storm \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "Coffee Tips", "content_type": "blog-post"}'
+```
+
 ## 📝 Usage
 
-### Basic Usage
+### API Usage
 
-```python
-from storm_research import graph
-from langchain_core.runnables import RunnableConfig
+#### 1. Create a Content Brief
 
-# Configuration
-config = RunnableConfig(
-    configurable={
-        "thread_id": "research-001",
-        "model": "openai/gpt-4.1",  # Setup model
-        "max_analysts": 3,
-        "max_interview_turns": 3,
-    }
-)
-
-# Start article generation
-inputs = {
-    "topic": "The Future of Quantum Computing in Cryptography",
-    "max_analysts": 3
-}
-
-# Execute (First step: Discover perspectives and generate analysts)
-result = await graph.ainvoke(inputs, config)
-
-# Provide user feedback (optional) to refine perspectives
-await graph.aupdate_state(
-    config,
-    {"human_analyst_feedback": "Please add a cybersecurity expert perspective"},
-    as_node="human_feedback"
-)
-
-# Complete the pre-writing stage and generate article
-final_result = await graph.ainvoke(None, config)
-print(final_result["final_report"])
+```bash
+curl -X POST http://localhost:8000/api/v1/briefs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topic": "Best Coffee Shops in Austin, Texas",
+    "content_type": "local-guide",
+    "seo": {
+      "primary_keyword": "coffee shops austin",
+      "secondary_keywords": ["austin coffee", "best coffee austin"],
+      "difficulty": "medium",
+      "intent": "informational"
+    },
+    "geo": {
+      "enabled": true,
+      "location": {"city": "Austin", "state": "Texas"},
+      "local_keywords": ["south congress", "downtown austin"],
+      "geo_intent": "local-service"
+    },
+    "target_audience": {
+      "segment": "local-business",
+      "expertise": "beginner"
+    },
+    "word_count": 2000,
+    "tone": "friendly"
+  }'
 ```
 
-### Configuration Options
+#### 2. Start Content Generation
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `model` | `azure/gpt-4.1` | LLM model to use (provider/model format) |
-| `max_analysts` | 3 | Number of analysts to generate |
-| `max_interview_turns` | 3 | Maximum interview turns per analyst |
-| `tavily_max_results` | 3 | Number of Tavily search results |
-| `arxiv_max_docs` | 3 | Number of ArXiv documents to retrieve |
-| `parallel_interviews` | `True` | Whether to run interviews in parallel |
-
-#### Supported Models
-
-- **Azure OpenAI**: `azure/gpt-4.1`, `azure/gpt-4.1-mini`, `azure/gpt-4.1-nano`
-- **OpenAI**: `openai/gpt-4.1`, `openai/gpt-4.1-mini`, `openai/gpt-4.1-nano`
-- **Anthropic**: `anthropic/claude-opus-4-20250514`, `anthropic/claude-3-7-sonnet-latest`, `anthropic/claude-3-5-haiku-latest`
-
-## 📚 Examples
-
-### Technology Research
-
-```python
-topic = "Next-Generation AI Architectures: Beyond Transformers"
+```bash
+curl -X POST http://localhost:8000/api/v1/briefs/{brief_id}/generate \
+  -H "Content-Type: application/json" \
+  -d '{"skip_analysis": false}'
 ```
 
-Generated analysts might include:
-- AI Architecture Researcher
-- Hardware Optimization Expert
-- Industry Applications Specialist
+#### 3. Check Generation Status
 
-### Business Analysis
-
-```python
-topic = "The Impact of AI on Global Supply Chain Management in 2024"
+```bash
+curl http://localhost:8000/api/v1/briefs/{brief_id}/status
 ```
 
-Generated analysts might include:
-- Supply Chain Expert
-- AI Technology Analyst
-- Business Strategy Consultant
+#### 4. Retrieve Generated Content
 
-### Academic Research
-
-```python
-topic = "Quantum Error Correction Methods for Scalable Quantum Computing"
+```bash
+curl http://localhost:8000/api/v1/content/{content_id}
 ```
 
-Generated analysts might include:
-- Quantum Physics Researcher
-- Error Correction Specialist
-- Hardware Implementation Expert
+### Supported Models (via Vercel AI Gateway)
+
+| Provider | Models |
+|----------|--------|
+| **xAI** | `xai/grok-4.1-fast-reasoning` (default) |
+| **OpenAI** | `openai/gpt-4o`, `openai/gpt-4o-mini` |
+| **Anthropic** | `anthropic/claude-sonnet-4.5`, `anthropic/claude-4-opus` |
+| **Google** | `google/gemini-pro` |
+
+### STORM 7 Perspectives
+
+The analysis engine generates outlines from these perspectives:
+1. **Beginner** - Foundational concepts, terminology, prerequisites
+2. **Business Owner** - ROI, costs, implementation timeline, risks
+3. **Local Market** - Regulations, competitors, local success stories
+4. **Technical** - How it works, requirements, integrations
+5. **Competitive** - Alternatives, comparisons, differentiators
+6. **Customer** - Pain points, decision factors, user experience
+7. **Industry Expert** - Best practices, trends, future outlook
+
+## 📚 Content Types
+
+### Supported Content Types
+
+| Type | Description | Best For |
+|------|-------------|----------|
+| `blog-post` | Standard blog article | General topics |
+| `local-guide` | Location-specific guide | Local SEO, business directories |
+| `comparison` | Product/service comparison | Commercial intent |
+| `how-to` | Step-by-step tutorial | Informational content |
+| `case-study` | In-depth analysis | B2B, professional services |
+
+### Example Topics
+
+**Local Business Content:**
+- "Best Coffee Shops in Austin, Texas"
+- "Top Digital Marketing Agencies in Miami"
+
+**Technology Content:**
+- "AI-Powered Content Generation Tools Comparison"
+- "How to Implement RAG in Enterprise Applications"
+
+**Business Content:**
+- "ROI of SEO for Small Businesses in 2024"
+- "Local Radio Advertising vs Digital Marketing"
 
 
 ## 📄 License
@@ -311,30 +321,28 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🌐 Web Frontend
 
-The project includes a Next.js frontend built with Vercel AI SDK that provides an interactive web interface for the STORM Research Assistant.
+The project includes a Next.js frontend for creating content briefs and viewing generated content.
 
 ### Frontend Features
 
 - **🎨 Modern UI**: Clean, responsive interface built with Tailwind CSS
-- **⚡ Real-time Streaming**: Live updates as research progresses
-- **🔧 Configuration Panel**: Easy setup for research parameters
-- **💬 Interactive Chat**: Provide feedback and refine research direction
-- **🎯 Model Selection**: Choose from multiple LLM providers
+- **📝 Content Brief Form**: Create and configure content briefs
+- **📊 Generation Status**: Real-time progress tracking
+- **📄 Content Viewer**: View and export generated content
 
 ### Frontend Tech Stack
 
 - **Next.js 15**: React framework with App Router
-- **Vercel AI SDK**: AI integration with streaming support
-- **LangSmithDeploymentTransport**: Direct connection to LangGraph backend
 - **Tailwind CSS**: Utility-first CSS framework
 - **TypeScript**: Type-safe development
+- **shadcn/ui**: UI component library
 
 ### Frontend Setup
 
-See [`frontend/README.md`](frontend/README.md) for detailed frontend setup instructions.
+See [`frontend/README.md`](frontend/README.md) for detailed setup instructions.
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/teddynote-lab/STORM-Research-Assistant/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/teddynote-lab/STORM-Research-Assistant/discussions)
-- **Documentation**: [Wiki](https://github.com/teddynote-lab/STORM-Research-Assistant/wiki)
+- **Issues**: [GitHub Issues](https://github.com/madezmedia/STORM-Research-Assistant/issues)
+- **Email**: tech@madezmedia.co
+- **API Docs**: http://localhost:8000/docs (when running locally)
