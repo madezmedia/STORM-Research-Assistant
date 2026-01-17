@@ -477,7 +477,12 @@ export function ContentBriefForm({ onSubmit, isSubmitting = false }: ContentBrie
                           ...formData,
                           geo: {
                             ...formData.geo,
-                            location: { ...formData.geo.location, country: e.target.value }
+                            location: {
+                              country: e.target.value,
+                              state: formData.geo.location?.state || '',
+                              city: formData.geo.location?.city || '',
+                              zip: formData.geo.location?.zip || ''
+                            }
                           }
                         })}
                         placeholder="Country"
@@ -494,7 +499,12 @@ export function ContentBriefForm({ onSubmit, isSubmitting = false }: ContentBrie
                           ...formData,
                           geo: {
                             ...formData.geo,
-                            location: { ...formData.geo.location, state: e.target.value }
+                            location: {
+                              country: formData.geo.location?.country || '',
+                              state: e.target.value,
+                              city: formData.geo.location?.city || '',
+                              zip: formData.geo.location?.zip || ''
+                            }
                           }
                         })}
                         placeholder="State"
@@ -511,7 +521,12 @@ export function ContentBriefForm({ onSubmit, isSubmitting = false }: ContentBrie
                           ...formData,
                           geo: {
                             ...formData.geo,
-                            location: { ...formData.geo.location, city: e.target.value }
+                            location: {
+                              country: formData.geo.location?.country || '',
+                              state: formData.geo.location?.state || '',
+                              city: e.target.value,
+                              zip: formData.geo.location?.zip || ''
+                            }
                           }
                         })}
                         placeholder="City"
@@ -528,7 +543,12 @@ export function ContentBriefForm({ onSubmit, isSubmitting = false }: ContentBrie
                           ...formData,
                           geo: {
                             ...formData.geo,
-                            location: { ...formData.geo.location, zip: e.target.value }
+                            location: {
+                              country: formData.geo.location?.country || '',
+                              state: formData.geo.location?.state || '',
+                              city: formData.geo.location?.city || '',
+                              zip: e.target.value
+                            }
                           }
                         })}
                         placeholder="ZIP Code"
