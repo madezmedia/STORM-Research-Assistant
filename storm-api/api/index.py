@@ -18,12 +18,230 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     VERCEL_AI_GATEWAY_URL: str = "https://ai-gateway.vercel.sh/v1"
     DEFAULT_MODEL: str = "openai/gpt-4o-mini"
+    TAVILY_API_KEY: str = ""
 
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 settings = Settings()
+
+
+# =============================================================================
+# Tavily Web Search
+# =============================================================================
+
+async def search_web(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    """Execute web search using Tavily API for grounded research"""
+    if not settings.TAVILY_API_KEY:
+        print("Tavily API key not configured - skipping web search")
+        return []
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": settings.TAVILY_API_KEY,
+                    "query": query,
+                    "max_results": max_results,
+                    "include_answer": True,
+                    "include_raw_content": False,
+                    "search_depth": "basic"
+                },
+                timeout=30.0
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get("results", [])
+                # Format results consistently
+                return [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "content": r.get("content", r.get("snippet", ""))[:500],
+                        "score": r.get("score", 0)
+                    }
+                    for r in results
+                ]
+            else:
+                print(f"Tavily search failed: {response.status_code}")
+    except Exception as e:
+        print(f"Tavily search error: {e}")
+
+    return []
+
+
+# =============================================================================
+# STORM Outline Generation
+# =============================================================================
+
+async def generate_storm_outline(topic: str, content_type: str = "blog_post") -> Dict[str, Any]:
+    """Generate a STORM-style outline with 7 perspectives and research queries"""
+
+    outline_prompt = f"""You are an expert content strategist using the STORM methodology.
+Generate a comprehensive outline for the topic: "{topic}"
+Content type: {content_type}
+
+Analyze this topic from these 7 expert perspectives:
+1. Beginner - What foundational concepts, terminology, and prerequisites does a newcomer need?
+2. Business Owner - What are the ROI considerations, costs, implementation timelines, and risks?
+3. Local Market Expert - What regulations, competitors, and local success stories are relevant?
+4. Technical Expert - How does this work technically? What are the requirements and integrations?
+5. Competitive Analyst - What are the alternatives, comparisons, and key differentiators?
+6. Customer Advocate - What are the pain points, decision factors, and user experience concerns?
+7. Industry Expert - What are the best practices, emerging trends, and future outlook?
+
+Return a JSON object with this exact structure:
+{{
+    "title": "Engaging article title",
+    "meta_description": "SEO-friendly description under 160 characters",
+    "sections": [
+        {{
+            "title": "Section Title",
+            "perspective": "Which perspective this addresses",
+            "subsections": [
+                {{"title": "Subsection 1"}},
+                {{"title": "Subsection 2"}}
+            ],
+            "key_questions": ["Question this section should answer"],
+            "data_needed": ["Statistics or facts needed"]
+        }}
+    ],
+    "research_queries": [
+        "Specific search query 1 for gathering facts",
+        "Specific search query 2 for gathering facts",
+        "Specific search query 3 for gathering facts",
+        "Specific search query 4 for gathering facts",
+        "Specific search query 5 for gathering facts"
+    ]
+}}
+
+Generate 4-6 comprehensive sections and 5 targeted research queries.
+Respond ONLY with the JSON object, no additional text."""
+
+    response = await call_llm(outline_prompt, max_tokens=2000)
+
+    if response:
+        # Try to parse JSON from response
+        try:
+            # Handle potential markdown code blocks
+            json_str = response.strip()
+            if json_str.startswith("```"):
+                json_str = json_str.split("```")[1]
+                if json_str.startswith("json"):
+                    json_str = json_str[4:]
+            import json
+            return json.loads(json_str.strip())
+        except Exception as e:
+            print(f"Failed to parse outline JSON: {e}")
+
+    # Fallback outline
+    return {
+        "title": f"Comprehensive Guide to {topic}",
+        "meta_description": f"Learn everything about {topic} with expert insights and practical recommendations.",
+        "sections": [
+            {"title": "Introduction", "perspective": "Beginner", "subsections": [{"title": "Overview"}, {"title": "Why It Matters"}], "key_questions": [f"What is {topic}?"], "data_needed": []},
+            {"title": "Key Concepts", "perspective": "Technical", "subsections": [{"title": "Fundamentals"}, {"title": "How It Works"}], "key_questions": [f"How does {topic} work?"], "data_needed": []},
+            {"title": "Benefits & Considerations", "perspective": "Business Owner", "subsections": [{"title": "Advantages"}, {"title": "Challenges"}], "key_questions": ["What are the benefits?"], "data_needed": []},
+            {"title": "Best Practices", "perspective": "Industry Expert", "subsections": [{"title": "Recommendations"}, {"title": "Common Mistakes"}], "key_questions": ["What are the best practices?"], "data_needed": []},
+            {"title": "Conclusion", "perspective": "Customer", "subsections": [{"title": "Summary"}, {"title": "Next Steps"}], "key_questions": ["What should I do next?"], "data_needed": []}
+        ],
+        "research_queries": [
+            f"{topic} statistics 2024",
+            f"{topic} benefits and advantages",
+            f"{topic} best practices guide",
+            f"{topic} comparison alternatives",
+            f"{topic} trends future outlook"
+        ]
+    }
+
+
+# =============================================================================
+# Research-Grounded Content Generation
+# =============================================================================
+
+async def generate_content_with_research(
+    topic: str,
+    outline: Dict[str, Any],
+    research_results: List[Dict[str, Any]],
+    word_count: int = 1500,
+    tone: str = "professional"
+) -> str:
+    """Generate comprehensive content grounded in research results"""
+
+    # Format research context
+    if research_results:
+        research_context = "\n\n".join([
+            f"**Source: {r.get('title', 'Unknown')}**\nURL: {r.get('url', 'N/A')}\n{r.get('content', '')}"
+            for r in research_results[:15]  # Limit to 15 sources
+        ])
+    else:
+        research_context = "No research data available - generate content based on general knowledge."
+
+    # Format outline sections
+    import json
+    sections_text = json.dumps(outline.get("sections", []), indent=2)
+
+    content_prompt = f"""You are an expert content writer using the STORM methodology.
+Write a comprehensive, well-researched article on: "{topic}"
+
+## Research Context (USE THESE SOURCES FOR FACTS AND CITATIONS)
+{research_context}
+
+## Article Outline to Follow
+{sections_text}
+
+## Requirements
+- Target word count: approximately {word_count} words
+- Tone: {tone}
+- Use markdown formatting with ## for main sections and ### for subsections
+- Ground your content with facts from the research context above
+- Cite sources using [Source Title] format when referencing specific information
+- Include statistics and data points from the research
+- Make content engaging with practical examples
+- Start with a compelling introduction that hooks the reader
+- End with actionable conclusions and recommendations
+
+## Important
+- Follow the outline structure provided
+- Incorporate insights from ALL perspectives (beginner, business, technical, etc.)
+- Make sure each section addresses its key questions
+- Do NOT make up statistics - only use what's in the research context or clearly state "studies show" without specific numbers
+
+Write the complete article now:"""
+
+    content = await call_llm(content_prompt, max_tokens=4000)
+
+    if not content:
+        # Fallback content
+        content = f"""# {outline.get('title', topic)}
+
+## Introduction
+
+{outline.get('meta_description', f'This guide explores {topic} comprehensively.')}
+
+*Note: Configure API keys to enable AI-powered content generation with research.*
+
+## Overview
+
+Understanding {topic} is essential in today's rapidly evolving landscape...
+
+## Key Takeaways
+
+Based on our analysis of {topic}, we recommend:
+
+1. Start with the fundamentals
+2. Consider your specific needs and context
+3. Stay updated with industry trends
+
+## Conclusion
+
+{topic} continues to evolve, and staying informed is key to success.
+"""
+
+    return content
 
 # Create app
 app = FastAPI(
@@ -168,16 +386,23 @@ async def call_llm(prompt: str, model: str = None, max_tokens: int = 1000) -> st
 
 @app.post("/api/v1/test-storm", response_model=STORMTestResponse)
 async def test_storm(request: STORMTestRequest):
-    """Test STORM analysis with a simple topic - uses Vercel AI Gateway if configured"""
+    """Test STORM analysis with full research pipeline"""
 
-    # Try to use LLM for perspectives
+    # =========================================================================
+    # STEP 1: Generate expert perspectives
+    # =========================================================================
     llm_perspectives = None
     if settings.OPENAI_API_KEY:
         perspective_prompt = f"""Generate {request.perspectives} expert perspectives on the topic: "{request.topic}"
 
-For each perspective, provide a unique viewpoint from a different domain expert (e.g., industry analyst, academic researcher, practitioner, etc.)
+For each perspective, provide a unique viewpoint from a different domain expert:
+1. Industry Analyst - Market trends and business implications
+2. Academic Researcher - Scientific and theoretical foundations
+3. Practitioner - Real-world implementation and best practices
+4. Consumer Advocate - User needs and accessibility concerns
+5. Technology Expert - Technical requirements and innovations
 
-Format as a numbered list with perspective title and brief description."""
+Format as a numbered list with perspective title and 1-2 sentence description."""
 
         llm_perspectives = await call_llm(perspective_prompt, max_tokens=500)
 
@@ -186,61 +411,50 @@ Format as a numbered list with perspective title and brief description."""
         perspectives = [line.strip() for line in llm_perspectives.split('\n') if line.strip() and line.strip()[0].isdigit()][:request.perspectives]
     else:
         perspectives = [
-            f"Expert {i+1} perspective on {request.topic}"
-            for i in range(request.perspectives)
-        ]
+            f"1. Industry Analyst perspective on {request.topic}",
+            f"2. Academic Researcher perspective on {request.topic}",
+            f"3. Practitioner perspective on {request.topic}"
+        ][:request.perspectives]
 
-    # Generate outline - format to match frontend expectations
-    outline = {
-        "topic": request.topic,
-        "content_type": "blog_post",
-        "title": f"Comprehensive Guide to {request.topic}",
-        "sections": [
-            {"title": "Introduction", "subsections": [{"title": "Overview"}, {"title": "Background"}]},
-            {"title": "Key Concepts", "subsections": [{"title": "Fundamentals"}, {"title": "Applications"}]},
-            {"title": "Analysis", "subsections": [{"title": "Current State"}, {"title": "Future Trends"}]},
-            {"title": "Conclusion", "subsections": [{"title": "Summary"}, {"title": "Recommendations"}]},
-        ]
-    }
+    # =========================================================================
+    # STEP 2: Generate STORM outline with research queries
+    # =========================================================================
+    outline = await generate_storm_outline(request.topic, "blog_post")
 
-    # Try to generate real content using LLM
-    sample_content = None
-    if settings.OPENAI_API_KEY:
-        content_prompt = f"""Write a comprehensive article about: "{request.topic}"
+    # Ensure outline has the required frontend format
+    if "sections" in outline:
+        for section in outline["sections"]:
+            if "subsections" not in section:
+                section["subsections"] = [{"title": "Overview"}]
 
-Structure the article with:
-1. Introduction - Overview and why this topic matters
-2. Key Concepts - Explain the fundamentals
-3. Analysis - Current state and emerging trends
-4. Conclusion - Summary and actionable recommendations
+    # =========================================================================
+    # STEP 3: Execute research queries (if Tavily configured)
+    # =========================================================================
+    research_results = []
+    research_queries = outline.get("research_queries", [])[:3]  # Limit for test endpoint
 
-Make it informative, engaging, and approximately 800 words.
-Use markdown formatting with ## headings."""
+    for query in research_queries:
+        results = await search_web(query, max_results=2)
+        research_results.extend(results)
 
-        sample_content = await call_llm(content_prompt, max_tokens=2000)
+    # =========================================================================
+    # STEP 4: Generate content with research context
+    # =========================================================================
+    sample_content = await generate_content_with_research(
+        topic=request.topic,
+        outline=outline,
+        research_results=research_results,
+        word_count=800,
+        tone="professional"
+    )
 
-    # Fallback content if LLM not available
-    if not sample_content:
-        sample_content = f"""# Comprehensive Guide to {request.topic}
-
-## Introduction
-
-This guide provides an in-depth analysis of {request.topic}, examining it from {request.perspectives} different perspectives.
-
-*Note: Configure OPENAI_API_KEY in Vercel environment variables to enable AI-powered content generation.*
-
-## Key Concepts
-
-Understanding {request.topic} requires familiarity with several fundamental concepts...
-
-## Analysis
-
-Our multi-perspective analysis reveals several important insights about {request.topic}...
-
-## Conclusion
-
-Based on our comprehensive examination of {request.topic}, we recommend...
-"""
+    # Add sources section if we have research
+    if research_results:
+        sources_section = "\n\n---\n\n## Sources\n\n" + "\n".join([
+            f"- [{r.get('title', 'Source')}]({r.get('url', '#')})"
+            for r in research_results[:5]
+        ])
+        sample_content += sources_section
 
     return STORMTestResponse(
         success=True,
@@ -320,85 +534,99 @@ async def list_briefs():
     return list(briefs_store.values())
 
 @app.post("/api/v1/briefs/{brief_id}/generate")
-async def generate_content(brief_id: str):
-    """Start content generation for a brief"""
+async def generate_content_endpoint(brief_id: str):
+    """Start STORM content generation for a brief with full research pipeline"""
     if brief_id not in briefs_store:
         raise HTTPException(status_code=404, detail="Brief not found")
 
     brief = briefs_store[brief_id]
-
-    # Update status to generating
-    brief["status"] = "generating"
-    brief["progress"] = 10
-    brief["current_phase"] = "Analyzing topic"
-
-    # Generate content using LLM
     topic = brief["topic"]
     word_count = brief.get("word_count", 1500)
+    content_type = brief.get("content_type", "blog_post")
+    tone = brief.get("tone", "professional")
 
-    # Generate the content
-    content = None
-    if settings.OPENAI_API_KEY:
-        content_prompt = f"""Write a comprehensive {brief.get('content_type', 'blog post')} about: "{topic}"
+    # =========================================================================
+    # PHASE 1: STORM Analysis - Generate outline with research queries (10%)
+    # =========================================================================
+    brief["status"] = "generating"
+    brief["progress"] = 10
+    brief["current_phase"] = "Generating STORM outline"
 
-Requirements:
-- Approximately {word_count} words
-- Professional tone
-- Include an engaging introduction
-- Use clear section headings (## Heading format)
-- Include practical examples and statistics where relevant
-- End with actionable conclusions
+    outline = await generate_storm_outline(topic, content_type)
+    print(f"Generated outline with {len(outline.get('sections', []))} sections")
 
-Structure:
-1. Introduction - Hook the reader and explain why this matters
-2. Main sections covering key aspects of the topic
-3. Analysis of current trends and future outlook
-4. Conclusion with key takeaways and recommendations
+    # =========================================================================
+    # PHASE 2: Research - Execute queries and gather sources (30%)
+    # =========================================================================
+    brief["progress"] = 30
+    brief["current_phase"] = "Researching topic"
 
-Use markdown formatting."""
+    research_results = []
+    research_queries = outline.get("research_queries", [])[:5]  # Limit to 5 queries
 
-        content = await call_llm(content_prompt, max_tokens=4000)
+    for i, query in enumerate(research_queries):
+        print(f"Executing research query {i+1}/{len(research_queries)}: {query}")
+        results = await search_web(query, max_results=3)
+        research_results.extend(results)
+        # Update progress during research
+        brief["progress"] = 30 + int((i + 1) / len(research_queries) * 20)
 
-    if not content:
-        content = f"""# {topic}
+    print(f"Gathered {len(research_results)} research sources")
 
-## Introduction
+    # =========================================================================
+    # PHASE 3: Content Generation - Write with research context (60%)
+    # =========================================================================
+    brief["progress"] = 60
+    brief["current_phase"] = "Writing content"
 
-This comprehensive guide explores {topic} in depth, providing valuable insights and practical recommendations.
+    content = await generate_content_with_research(
+        topic=topic,
+        outline=outline,
+        research_results=research_results,
+        word_count=word_count,
+        tone=tone
+    )
 
-*Note: Configure OPENAI_API_KEY to enable AI-powered content generation.*
-
-## Key Concepts
-
-Understanding {topic} is essential in today's rapidly evolving landscape...
-
-## Analysis
-
-Our analysis reveals several important trends and considerations...
-
-## Conclusion
-
-Based on our examination of {topic}, we recommend focusing on key areas for maximum impact.
-"""
+    # =========================================================================
+    # PHASE 4: Finalize - Store and complete (100%)
+    # =========================================================================
+    brief["progress"] = 90
+    brief["current_phase"] = "Finalizing content"
 
     # Count words
     actual_word_count = len(content.split())
+
+    # Extract sections from outline for response
+    sections = [
+        {
+            "heading": section.get("title", "Section"),
+            "perspective": section.get("perspective", "General"),
+            "content": "..."
+        }
+        for section in outline.get("sections", [])
+    ]
+
+    # Collect unique sources
+    sources = list(set([r.get("url", "") for r in research_results if r.get("url")]))
 
     # Store generated content
     content_id = str(uuid.uuid4())
     content_store[brief_id] = {
         "id": content_id,
         "brief_id": brief_id,
-        "title": topic,
+        "title": outline.get("title", topic),
+        "meta_description": outline.get("meta_description", ""),
         "content": content,
         "word_count": actual_word_count,
-        "sections": [
-            {"heading": "Introduction", "content": "..."},
-            {"heading": "Key Concepts", "content": "..."},
-            {"heading": "Analysis", "content": "..."},
-            {"heading": "Conclusion", "content": "..."},
-        ],
-        "seo_score": {"overall": 85, "readability": 90, "keyword_density": 80},
+        "sections": sections,
+        "sources": sources[:10],  # Top 10 sources
+        "research_queries": research_queries,
+        "seo_score": {
+            "overall": 85 if research_results else 60,
+            "readability": 90,
+            "keyword_density": 80,
+            "sources_cited": len(sources)
+        },
         "created_at": datetime.now().isoformat()
     }
 
@@ -406,8 +634,14 @@ Based on our examination of {topic}, we recommend focusing on key areas for maxi
     brief["status"] = "complete"
     brief["progress"] = 100
     brief["current_phase"] = "Complete"
+    brief["outline"] = outline
 
-    return {"status": "started", "brief_id": brief_id}
+    return {
+        "status": "started",
+        "brief_id": brief_id,
+        "research_sources": len(research_results),
+        "outline_sections": len(outline.get("sections", []))
+    }
 
 @app.get("/api/v1/briefs/{brief_id}/status", response_model=GenerationStatusResponse)
 async def get_generation_status(brief_id: str):

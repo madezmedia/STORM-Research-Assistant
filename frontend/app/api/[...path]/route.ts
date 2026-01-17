@@ -39,15 +39,30 @@ export async function POST(
   const url = `${API_BASE_URL}/${apiPath}`;
 
   try {
-    const body = await request.json();
-    const response = await fetch(url, {
+    // Handle cases where there's no body or empty body
+    let body = null;
+    const contentLength = request.headers.get('content-length');
+    if (contentLength && parseInt(contentLength) > 0) {
+      try {
+        body = await request.json();
+      } catch {
+        // No JSON body or invalid JSON - that's okay for some endpoints
+      }
+    }
+
+    const fetchOptions: RequestInit = {
       method: 'POST',
       headers: {
         'Authorization': request.headers.get('Authorization') || '',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
-    });
+    };
+
+    if (body) {
+      fetchOptions.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(url, fetchOptions);
 
     const data = await response.json();
     return NextResponse.json(data, { status: response.status });
