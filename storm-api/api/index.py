@@ -1,30 +1,40 @@
 """
 Vercel Serverless Function Handler
 
-For Vercel Python, just export the FastAPI app directly.
-Vercel's runtime handles ASGI natively without Mangum.
+Simple inline FastAPI app for Vercel Python.
 """
 
-import sys
-from pathlib import Path
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Create app
+app = FastAPI(
+    title="STORM Content Generation API",
+    description="API for generating SEO-optimized, GEO-targeted content",
+    version="1.0.0",
+)
 
-# Try to import the full app
-try:
-    from main import app
-    print("Full STORM app loaded successfully")
-except Exception as e:
-    # Fallback to minimal app if main fails
-    print(f"Failed to load main app: {e}")
-    from fastapi import FastAPI
-    app = FastAPI(title="STORM API (Fallback)")
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    @app.get("/")
-    def root():
-        return {"status": "fallback", "error": str(e)}
+@app.get("/")
+def root():
+    return {
+        "name": "STORM Content Generation API",
+        "version": "1.0.0",
+        "status": "running",
+    }
 
-    @app.get("/health")
-    def health():
-        return {"status": "healthy", "mode": "fallback", "import_error": str(e)}
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+@app.get("/api/v1/test")
+def test():
+    return {"message": "API is working", "endpoint": "/api/v1/test"}
