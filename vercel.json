@@ -1,14 +1,24 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "framework": null,
-  "buildCommand": null,
-  "outputDirectory": null,
-  "installCommand": null,
-  "devCommand": null,
+  "name": "storm-research-assistant",
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "outputDirectory": "frontend/.next",
+  "installCommand": "cd frontend && npm install",
+  "framework": "nextjs",
   "git": {
     "deploymentEnabled": {
       "main": true
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/v1/:path*",
+      "destination": "https://storm-api.vercel.app/api/v1/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://storm-api.vercel.app/health"
+    }
+  ]
 }

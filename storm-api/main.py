@@ -62,6 +62,10 @@ from app.seo import (
 from app.geo import (
     GEOEnhancer, enhance_content,
 )
+from app.geo_pipeline import (
+    GEOPipeline, NicheAnalyzer, GoogleKeywordResearch,
+    PromptGenerator, KeywordTracker,
+)
 
 # Configuration
 class Settings(BaseSettings):
@@ -191,17 +195,88 @@ class GeneratedContent(Base):
 class ResearchData(Base):
     """Research data model"""
     __tablename__ = "research_data"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     brief_id = Column(UUID(as_uuid=True), ForeignKey('content_briefs.id'), nullable=False)
     query = Column(String(500), nullable=False)
     source = Column(String(100), nullable=False)
     data = Column(JSON, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+
     # Indexes
     __table_args__ = (
         Index('idx_research_data_brief_id', 'brief_id'),
+    )
+
+
+class GEOAnalysis(Base):
+    """GEO Analysis model for storing website analysis results"""
+    __tablename__ = "geo_analyses"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    brand_name = Column(String(255), nullable=False)
+    domain = Column(String(255), nullable=False)
+    keywords = Column(JSON, nullable=True)  # [(keyword, score), ...]
+    topics = Column(JSON, nullable=True)
+    questions = Column(JSON, nullable=True)  # PAA questions
+    related_searches = Column(JSON, nullable=True)
+    autocomplete = Column(JSON, nullable=True)
+    prompts = Column(JSON, nullable=True)
+    competitors = Column(JSON, nullable=True)
+    content_summary = Column(Text, nullable=True)
+    pages_analyzed = Column(Integer, default=0)
+    status = Column(String(50), default="pending")  # pending, analyzing, complete, failed
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_geo_analyses_brand_name', 'brand_name'),
+        Index('idx_geo_analyses_domain', 'domain'),
+        Index('idx_geo_analyses_status', 'status'),
+    )
+
+
+class KeywordTracking(Base):
+    """Keyword tracking model for LLM response analysis"""
+    __tablename__ = "keyword_tracking"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey('geo_analyses.id'), nullable=False)
+    prompt = Column(Text, nullable=False)
+    llm_name = Column(String(100), nullable=False)
+    response_text = Column(Text, nullable=True)
+    brand_mentioned = Column(Boolean, default=False)
+    mentions = Column(JSON, nullable=True)  # {keyword: {count, positions}}
+    position_score = Column(Integer, default=0)
+    total_mentions = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_keyword_tracking_analysis_id', 'analysis_id'),
+        Index('idx_keyword_tracking_llm_name', 'llm_name'),
+    )
+
+
+class GEOPromptModel(Base):
+    """GEO Prompt model for storing generated prompts"""
+    __tablename__ = "geo_prompts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey('geo_analyses.id'), nullable=False)
+    prompt_text = Column(Text, nullable=False)
+    category = Column(String(50), nullable=False)  # direct_mention, comparison, recommendation, feature_inquiry
+    target_keywords = Column(JSON, nullable=True)
+    expected_mention = Column(String(255), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_geo_prompts_analysis_id', 'analysis_id'),
+        Index('idx_geo_prompts_category', 'category'),
     )
 
 
@@ -344,6 +419,86 @@ class WebhookPayload(BaseModel):
     seo_score: int
     generated_at: str
     webhook_url: str
+
+
+# ====================== GEO Pipeline Pydantic Models ======================
+
+
+class GEOAnalyzeRequest(BaseModel):
+    """Request to analyze a website for GEO pipeline"""
+    url: str = Field(..., description="Website URL to analyze")
+    brand_name: str = Field(..., description="Brand name to track")
+    crawl_limit: int = Field(default=10, ge=1, le=50, description="Max pages to crawl")
+    competitors: Optional[List[str]] = Field(default=None, description="Known competitor names")
+
+
+class GEOAnalysisResponse(BaseModel):
+    """GEO analysis response"""
+    id: str
+    brand_name: str
+    domain: str
+    keywords: List[tuple]  # [(keyword, score), ...]
+    topics: List[str]
+    questions: List[str]
+    related_searches: List[str]
+    autocomplete: List[str]
+    pages_analyzed: int
+    content_summary: str
+    status: str
+    created_at: str
+
+
+class GEOPromptRequest(BaseModel):
+    """Request to generate prompts"""
+    keywords: List[str] = Field(..., description="Target keywords")
+    questions: List[str] = Field(default_factory=list, description="PAA questions")
+    brand_name: str = Field(..., description="Brand name")
+    competitors: Optional[List[str]] = Field(default=None, description="Competitor names")
+
+
+class GEOPromptResponse(BaseModel):
+    """Generated prompt response"""
+    prompt_text: str
+    category: str
+    target_keywords: List[str]
+    expected_mention: str
+
+
+class GEOPromptsResponse(BaseModel):
+    """Response containing multiple prompts"""
+    brand_name: str
+    prompt_count: int
+    prompts: List[GEOPromptResponse]
+
+
+class GEOTrackRequest(BaseModel):
+    """Request to track LLM response"""
+    response_text: str = Field(..., description="LLM response text to analyze")
+    prompt: str = Field(..., description="Original prompt used")
+    llm_name: str = Field(..., description="Name of the LLM (e.g., 'gpt-4', 'claude-3')")
+    keywords: List[str] = Field(..., description="Keywords to track")
+    brand_name: str = Field(..., description="Brand name to track")
+
+
+class GEOTrackResponse(BaseModel):
+    """Keyword tracking response"""
+    brand_mentioned: bool
+    brand_mentions: Dict[str, Any]
+    keyword_mentions: Dict[str, Any]
+    total_mentions: int
+    position_score: float
+
+
+class GEOExportRequest(BaseModel):
+    """Request to export prompts in GEGO format"""
+    analysis_id: str = Field(..., description="Analysis ID to export prompts from")
+
+
+class GEOExportResponse(BaseModel):
+    """GEGO export response"""
+    brand_name: str
+    prompt_count: int
+    prompts: List[Dict[str, Any]]
 
 
 # ====================== LLM Client (Vercel AI Gateway) ======================
@@ -1248,6 +1403,306 @@ async def test_storm_analysis(request: STORMTestRequest):
             success=False,
             error=f"{str(e)}\n{traceback.format_exc()}",
         )
+
+
+# ====================== GEO Pipeline Endpoints ======================
+
+
+@app.post("/api/v1/geo/analyze-website", response_model=GEOAnalysisResponse, status_code=202)
+async def analyze_website(
+    request: GEOAnalyzeRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Analyze a website to extract keywords, topics, and generate monitoring prompts.
+
+    This starts an async analysis job and returns immediately with the analysis ID.
+    Use GET /api/v1/geo/analysis/{analysis_id} to check status and get results.
+    """
+    async with async_session() as session:
+        # Create analysis record
+        analysis = GEOAnalysis(
+            id=uuid4(),
+            brand_name=request.brand_name,
+            domain=request.url.split("//")[-1].split("/")[0],
+            competitors=request.competitors,
+            status="pending",
+        )
+        session.add(analysis)
+        await session.commit()
+        await session.refresh(analysis)
+
+        analysis_id = str(analysis.id)
+
+    # Start background analysis
+    background_tasks.add_task(
+        run_geo_analysis,
+        analysis_id,
+        request.url,
+        request.brand_name,
+        request.crawl_limit,
+        request.competitors,
+    )
+
+    return GEOAnalysisResponse(
+        id=analysis_id,
+        brand_name=request.brand_name,
+        domain=request.url.split("//")[-1].split("/")[0],
+        keywords=[],
+        topics=[],
+        questions=[],
+        related_searches=[],
+        autocomplete=[],
+        pages_analyzed=0,
+        content_summary="",
+        status="pending",
+        created_at=str(analysis.created_at) if analysis.created_at else "",
+    )
+
+
+async def run_geo_analysis(
+    analysis_id: str,
+    url: str,
+    brand_name: str,
+    crawl_limit: int,
+    competitors: Optional[List[str]],
+):
+    """Background task to run GEO analysis"""
+    try:
+        # Update status to analyzing
+        async with async_session() as session:
+            result = await session.execute(
+                select(GEOAnalysis).where(GEOAnalysis.id == analysis_id)
+            )
+            analysis = result.scalar_one_or_none()
+            if analysis:
+                analysis.status = "analyzing"
+                await session.commit()
+
+        # Run the GEO pipeline
+        pipeline = GEOPipeline(brand_name=brand_name, use_keybert=True)
+        results = await pipeline.run_full_pipeline(
+            url=url,
+            crawl_limit=crawl_limit,
+            competitors=competitors,
+        )
+
+        # Update analysis with results
+        async with async_session() as session:
+            result = await session.execute(
+                select(GEOAnalysis).where(GEOAnalysis.id == analysis_id)
+            )
+            analysis = result.scalar_one_or_none()
+            if analysis:
+                analysis.keywords = results["analysis"]["keywords"]
+                analysis.topics = results["analysis"]["topics"]
+                analysis.questions = results["research"]["paa_questions"]
+                analysis.related_searches = results["research"]["related_searches"]
+                analysis.autocomplete = results["research"]["autocomplete"]
+                analysis.prompts = results["prompts"]
+                analysis.content_summary = results["analysis"]["content_summary"]
+                analysis.pages_analyzed = results["analysis"]["pages_analyzed"]
+                analysis.status = "complete"
+                await session.commit()
+
+        # Store prompts in geo_prompts table
+        async with async_session() as session:
+            for prompt_data in results["prompts"]:
+                prompt = GEOPromptModel(
+                    id=uuid4(),
+                    analysis_id=analysis_id,
+                    prompt_text=prompt_data["prompt"],
+                    category=prompt_data["category"],
+                    target_keywords=prompt_data["target_keywords"],
+                    expected_mention=prompt_data["expected_mention"],
+                )
+                session.add(prompt)
+            await session.commit()
+
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        async with async_session() as session:
+            result = await session.execute(
+                select(GEOAnalysis).where(GEOAnalysis.id == analysis_id)
+            )
+            analysis = result.scalar_one_or_none()
+            if analysis:
+                analysis.status = "failed"
+                analysis.error_message = error_msg
+                await session.commit()
+
+
+@app.get("/api/v1/geo/analysis/{analysis_id}", response_model=GEOAnalysisResponse)
+async def get_geo_analysis(analysis_id: str):
+    """Get GEO analysis results by ID"""
+    async with async_session() as session:
+        result = await session.execute(
+            select(GEOAnalysis).where(GEOAnalysis.id == analysis_id)
+        )
+        analysis = result.scalar_one_or_none()
+
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+
+        return GEOAnalysisResponse(
+            id=str(analysis.id),
+            brand_name=analysis.brand_name,
+            domain=analysis.domain,
+            keywords=analysis.keywords or [],
+            topics=analysis.topics or [],
+            questions=analysis.questions or [],
+            related_searches=analysis.related_searches or [],
+            autocomplete=analysis.autocomplete or [],
+            pages_analyzed=analysis.pages_analyzed or 0,
+            content_summary=analysis.content_summary or "",
+            status=analysis.status,
+            created_at=str(analysis.created_at) if analysis.created_at else "",
+        )
+
+
+@app.post("/api/v1/geo/generate-prompts", response_model=GEOPromptsResponse)
+async def generate_geo_prompts(request: GEOPromptRequest):
+    """
+    Generate LLM monitoring prompts for brand tracking.
+
+    Returns prompts in various categories:
+    - direct_mention: Questions about the brand
+    - comparison: Brand vs competitors
+    - recommendation: Category recommendations
+    - feature_inquiry: Feature-specific questions
+    """
+    generator = PromptGenerator(brand_name=request.brand_name)
+    prompts = generator.generate_prompts(
+        keywords=request.keywords,
+        questions=request.questions,
+        competitors=request.competitors,
+    )
+
+    return GEOPromptsResponse(
+        brand_name=request.brand_name,
+        prompt_count=len(prompts),
+        prompts=[
+            GEOPromptResponse(
+                prompt_text=p.prompt_text,
+                category=p.category,
+                target_keywords=p.target_keywords,
+                expected_mention=p.expected_mention,
+            )
+            for p in prompts
+        ],
+    )
+
+
+@app.post("/api/v1/geo/track-response", response_model=GEOTrackResponse)
+async def track_llm_response(request: GEOTrackRequest):
+    """
+    Track brand and keyword mentions in an LLM response.
+
+    Analyzes the response for:
+    - Direct brand mentions
+    - Keyword occurrences
+    - Position tracking (earlier = better)
+    """
+    tracker = KeywordTracker(
+        brand_name=request.brand_name,
+        keywords=request.keywords,
+    )
+
+    results = tracker.analyze_response(
+        response_text=request.response_text,
+        prompt=request.prompt,
+    )
+
+    # Optionally store tracking result if we have an analysis context
+    # This could be enhanced to link to a specific analysis
+
+    return GEOTrackResponse(
+        brand_mentioned=results["brand_mentioned"],
+        brand_mentions=results["brand_mentions"],
+        keyword_mentions=results["keyword_mentions"],
+        total_mentions=results["total_mentions"],
+        position_score=results["position_score"],
+    )
+
+
+@app.get("/api/v1/geo/keywords/{analysis_id}")
+async def get_geo_keywords(analysis_id: str):
+    """Get extracted keywords from a GEO analysis"""
+    async with async_session() as session:
+        result = await session.execute(
+            select(GEOAnalysis).where(GEOAnalysis.id == analysis_id)
+        )
+        analysis = result.scalar_one_or_none()
+
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+
+        return {
+            "analysis_id": str(analysis.id),
+            "brand_name": analysis.brand_name,
+            "keywords": analysis.keywords or [],
+            "topics": analysis.topics or [],
+        }
+
+
+@app.post("/api/v1/geo/export-gego", response_model=GEOExportResponse)
+async def export_gego_prompts(request: GEOExportRequest):
+    """
+    Export prompts in GEGO-compatible JSON format.
+
+    Returns prompts formatted for use with GEGO monitoring tools.
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            select(GEOAnalysis).where(GEOAnalysis.id == request.analysis_id)
+        )
+        analysis = result.scalar_one_or_none()
+
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+
+        # Get prompts from the analysis
+        prompts = analysis.prompts or []
+
+        return GEOExportResponse(
+            brand_name=analysis.brand_name,
+            prompt_count=len(prompts),
+            prompts=prompts,
+        )
+
+
+@app.get("/api/v1/geo/analyses")
+async def list_geo_analyses(
+    skip: int = 0,
+    limit: int = 50,
+    brand_name: Optional[str] = None,
+):
+    """List all GEO analyses with optional filtering"""
+    async with async_session() as session:
+        query = select(GEOAnalysis).order_by(GEOAnalysis.created_at.desc())
+
+        if brand_name:
+            query = query.where(GEOAnalysis.brand_name == brand_name)
+
+        query = query.offset(skip).limit(limit)
+        result = await session.execute(query)
+        analyses = result.scalars().all()
+
+        return {
+            "count": len(analyses),
+            "analyses": [
+                {
+                    "id": str(a.id),
+                    "brand_name": a.brand_name,
+                    "domain": a.domain,
+                    "status": a.status,
+                    "pages_analyzed": a.pages_analyzed,
+                    "created_at": str(a.created_at) if a.created_at else "",
+                }
+                for a in analyses
+            ],
+        }
 
 
 @app.on_event("startup")
