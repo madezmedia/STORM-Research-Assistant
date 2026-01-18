@@ -1,7 +1,8 @@
 /**
  * API exports
  */
-export { api, ApiError } from './client';
+import { api, ApiError } from './client';
+export { api, ApiError };
 export { briefsApi, contentApi } from './briefs';
 export { geoApi } from './geo';
 export { slidesApi } from './slides';
