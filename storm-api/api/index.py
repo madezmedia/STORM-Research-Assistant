@@ -3,9 +3,12 @@ Vercel Serverless Function Handler
 
 FastAPI app for STORM Content Generation API.
 Inline implementation for Vercel compatibility.
+
+Storage: Uses Vercel KV (Redis) for persistent storage across serverless invocations.
 """
 
 import os
+import json
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -20,11 +23,173 @@ class Settings(BaseSettings):
     DEFAULT_MODEL: str = "openai/gpt-4o-mini"
     TAVILY_API_KEY: str = ""
 
+    # Vercel KV (Redis) Settings
+    KV_REST_API_URL: str = ""
+    KV_REST_API_TOKEN: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 settings = Settings()
+
+
+# =============================================================================
+# Vercel KV Storage Client
+# =============================================================================
+
+class KVStorage:
+    """
+    Vercel KV storage client using REST API.
+
+    Provides persistent storage for briefs, content, and slideshow jobs
+    across serverless function invocations.
+    """
+
+    def __init__(self, url: str, token: str):
+        self.url = url.rstrip('/')
+        self.token = token
+        self.enabled = bool(url and token)
+
+    async def get(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get value from KV store"""
+        if not self.enabled:
+            return None
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.url}/get/{key}",
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=10.0
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data.get("result")
+                    if result:
+                        return json.loads(result) if isinstance(result, str) else result
+        except Exception as e:
+            print(f"KV get error: {e}")
+        return None
+
+    async def set(self, key: str, value: Dict[str, Any], ex: int = 86400) -> bool:
+        """Set value in KV store with expiration (default 24 hours)"""
+        if not self.enabled:
+            return False
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.url}",
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Content-Type": "application/json"
+                    },
+                    json=["SET", key, json.dumps(value), "EX", ex],
+                    timeout=10.0
+                )
+                return response.status_code == 200
+        except Exception as e:
+            print(f"KV set error: {e}")
+        return False
+
+    async def delete(self, key: str) -> bool:
+        """Delete key from KV store"""
+        if not self.enabled:
+            return False
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.url}",
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Content-Type": "application/json"
+                    },
+                    json=["DEL", key],
+                    timeout=10.0
+                )
+                return response.status_code == 200
+        except Exception as e:
+            print(f"KV delete error: {e}")
+        return False
+
+    async def keys(self, pattern: str = "*") -> List[str]:
+        """Get all keys matching pattern"""
+        if not self.enabled:
+            return []
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.url}",
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Content-Type": "application/json"
+                    },
+                    json=["KEYS", pattern],
+                    timeout=10.0
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("result", [])
+        except Exception as e:
+            print(f"KV keys error: {e}")
+        return []
+
+
+# Initialize KV storage
+kv = KVStorage(settings.KV_REST_API_URL, settings.KV_REST_API_TOKEN)
+
+# Fallback in-memory storage (for local development without KV)
+_memory_store: Dict[str, Dict[str, Any]] = {
+    "briefs": {},
+    "content": {},
+    "slideshow_jobs": {}
+}
+
+
+async def storage_get(namespace: str, key: str) -> Optional[Dict[str, Any]]:
+    """Get from KV or fallback to memory"""
+    full_key = f"{namespace}:{key}"
+    result = await kv.get(full_key)
+    if result is not None:
+        return result
+    return _memory_store.get(namespace, {}).get(key)
+
+
+async def storage_set(namespace: str, key: str, value: Dict[str, Any], ex: int = 86400) -> bool:
+    """Set in KV and memory fallback"""
+    full_key = f"{namespace}:{key}"
+    # Always update memory for immediate reads in same invocation
+    if namespace not in _memory_store:
+        _memory_store[namespace] = {}
+    _memory_store[namespace][key] = value
+    # Try to persist to KV
+    return await kv.set(full_key, value, ex)
+
+
+async def storage_delete(namespace: str, key: str) -> bool:
+    """Delete from KV and memory"""
+    full_key = f"{namespace}:{key}"
+    if namespace in _memory_store and key in _memory_store[namespace]:
+        del _memory_store[namespace][key]
+    return await kv.delete(full_key)
+
+
+async def storage_list(namespace: str) -> List[Dict[str, Any]]:
+    """List all items in namespace"""
+    # Try KV first
+    keys = await kv.keys(f"{namespace}:*")
+    if keys:
+        items = []
+        for key in keys:
+            item = await kv.get(key)
+            if item:
+                items.append(item)
+        return items
+    # Fallback to memory
+    return list(_memory_store.get(namespace, {}).values())
 
 
 # =============================================================================
@@ -281,8 +446,15 @@ def root():
     }
 
 @app.get("/health")
-def health():
-    return {"status": "healthy"}
+async def health():
+    """Health check with storage status"""
+    return {
+        "status": "healthy",
+        "storage": {
+            "kv_enabled": kv.enabled,
+            "kv_url_configured": bool(settings.KV_REST_API_URL),
+        }
+    }
 
 @app.get("/api/v1/test")
 def test():
@@ -464,12 +636,11 @@ Format as a numbered list with perspective title and 1-2 sentence description.""
         sample_content=sample_content
     )
 
-# In-memory storage for briefs (no database needed for serverless)
+# Storage uses Vercel KV with in-memory fallback (see KVStorage class above)
 import uuid
 from datetime import datetime
 
-briefs_store: Dict[str, Any] = {}
-content_store: Dict[str, Any] = {}
+# Legacy references removed - now using storage_get/storage_set functions
 
 # Briefs endpoint
 class ContentBriefCreate(BaseModel):
@@ -508,9 +679,9 @@ class GeneratedContentResponse(BaseModel):
 
 @app.post("/api/v1/briefs", response_model=ContentBriefResponse, status_code=201)
 async def create_brief(brief: ContentBriefCreate):
-    """Create a new content brief"""
+    """Create a new content brief (stored in Vercel KV)"""
     brief_id = str(uuid.uuid4())
-    briefs_store[brief_id] = {
+    brief_data = {
         "id": brief_id,
         "topic": brief.topic,
         "content_type": brief.content_type,
@@ -521,6 +692,7 @@ async def create_brief(brief: ContentBriefCreate):
         "current_phase": "Created",
         "created_at": datetime.now().isoformat()
     }
+    await storage_set("briefs", brief_id, brief_data, ex=604800)  # 7 days
     return ContentBriefResponse(
         id=brief_id,
         topic=brief.topic,
@@ -530,16 +702,15 @@ async def create_brief(brief: ContentBriefCreate):
 
 @app.get("/api/v1/briefs")
 async def list_briefs():
-    """List content briefs"""
-    return list(briefs_store.values())
+    """List content briefs (from Vercel KV)"""
+    return await storage_list("briefs")
 
 @app.post("/api/v1/briefs/{brief_id}/generate")
 async def generate_content_endpoint(brief_id: str):
     """Start STORM content generation for a brief with full research pipeline"""
-    if brief_id not in briefs_store:
+    brief = await storage_get("briefs", brief_id)
+    if not brief:
         raise HTTPException(status_code=404, detail="Brief not found")
-
-    brief = briefs_store[brief_id]
     topic = brief["topic"]
     word_count = brief.get("word_count", 1500)
     content_type = brief.get("content_type", "blog_post")
@@ -551,6 +722,7 @@ async def generate_content_endpoint(brief_id: str):
     brief["status"] = "generating"
     brief["progress"] = 10
     brief["current_phase"] = "Generating STORM outline"
+    await storage_set("briefs", brief_id, brief, ex=604800)
 
     outline = await generate_storm_outline(topic, content_type)
     print(f"Generated outline with {len(outline.get('sections', []))} sections")
@@ -560,6 +732,7 @@ async def generate_content_endpoint(brief_id: str):
     # =========================================================================
     brief["progress"] = 30
     brief["current_phase"] = "Researching topic"
+    await storage_set("briefs", brief_id, brief, ex=604800)
 
     research_results = []
     research_queries = outline.get("research_queries", [])[:5]  # Limit to 5 queries
@@ -570,6 +743,7 @@ async def generate_content_endpoint(brief_id: str):
         research_results.extend(results)
         # Update progress during research
         brief["progress"] = 30 + int((i + 1) / len(research_queries) * 20)
+        await storage_set("briefs", brief_id, brief, ex=604800)
 
     print(f"Gathered {len(research_results)} research sources")
 
@@ -578,6 +752,7 @@ async def generate_content_endpoint(brief_id: str):
     # =========================================================================
     brief["progress"] = 60
     brief["current_phase"] = "Writing content"
+    await storage_set("briefs", brief_id, brief, ex=604800)
 
     content = await generate_content_with_research(
         topic=topic,
@@ -592,6 +767,7 @@ async def generate_content_endpoint(brief_id: str):
     # =========================================================================
     brief["progress"] = 90
     brief["current_phase"] = "Finalizing content"
+    await storage_set("briefs", brief_id, brief, ex=604800)
 
     # Count words
     actual_word_count = len(content.split())
@@ -609,9 +785,9 @@ async def generate_content_endpoint(brief_id: str):
     # Collect unique sources
     sources = list(set([r.get("url", "") for r in research_results if r.get("url")]))
 
-    # Store generated content
+    # Store generated content in KV
     content_id = str(uuid.uuid4())
-    content_store[brief_id] = {
+    content_data = {
         "id": content_id,
         "brief_id": brief_id,
         "title": outline.get("title", topic),
@@ -629,12 +805,14 @@ async def generate_content_endpoint(brief_id: str):
         },
         "created_at": datetime.now().isoformat()
     }
+    await storage_set("content", brief_id, content_data, ex=604800)  # 7 days
 
     # Update brief status
     brief["status"] = "complete"
     brief["progress"] = 100
     brief["current_phase"] = "Complete"
     brief["outline"] = outline
+    await storage_set("briefs", brief_id, brief, ex=604800)
 
     return {
         "status": "started",
@@ -645,11 +823,11 @@ async def generate_content_endpoint(brief_id: str):
 
 @app.get("/api/v1/briefs/{brief_id}/status", response_model=GenerationStatusResponse)
 async def get_generation_status(brief_id: str):
-    """Get the status of content generation"""
-    if brief_id not in briefs_store:
+    """Get the status of content generation (from Vercel KV)"""
+    brief = await storage_get("briefs", brief_id)
+    if not brief:
         raise HTTPException(status_code=404, detail="Brief not found")
 
-    brief = briefs_store[brief_id]
     return GenerationStatusResponse(
         brief_id=brief_id,
         status=brief.get("status", "unknown"),
@@ -660,11 +838,12 @@ async def get_generation_status(brief_id: str):
 
 @app.get("/api/v1/content/{brief_id}", response_model=GeneratedContentResponse)
 async def get_generated_content(brief_id: str):
-    """Get the generated content for a brief"""
-    if brief_id not in content_store:
+    """Get the generated content for a brief (from Vercel KV)"""
+    content = await storage_get("content", brief_id)
+    if not content:
         raise HTTPException(status_code=404, detail="Content not found")
 
-    return content_store[brief_id]
+    return content
 
 
 # =============================================================================
@@ -758,8 +937,7 @@ class VideoGenerationRequest(BaseModel):
     audio_path: Optional[str] = None
 
 
-# In-memory storage for slideshow jobs
-slideshow_jobs: Dict[str, Any] = {}
+# Slideshow jobs storage uses Vercel KV (see storage_get/storage_set above)
 
 
 @app.get("/api/v1/slides/status")
@@ -816,15 +994,16 @@ async def generate_slides(request: SlideGenerationRequest):
             zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
-        # Store job for retrieval
+        # Store job for retrieval in KV
         job_id = str(uuid.uuid4())
-        slideshow_jobs[job_id] = {
+        job_data = {
             "id": job_id,
             "type": "slides",
             "status": "complete",
             "result": result,
             "created_at": datetime.now().isoformat()
         }
+        await storage_set("slideshow_jobs", job_id, job_data, ex=86400)  # 24 hours
 
         return {
             "success": True,
@@ -904,9 +1083,9 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
             title=request.title
         )
 
-        # Store job
+        # Store job in KV
         job_id = str(uuid.uuid4())
-        slideshow_jobs[job_id] = {
+        job_data = {
             "id": job_id,
             "type": "slideshow",
             "status": "complete",
@@ -914,6 +1093,7 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
             "slide_count": len(slides),
             "created_at": datetime.now().isoformat()
         }
+        await storage_set("slideshow_jobs", job_id, job_data, ex=86400)  # 24 hours
 
         return {
             "success": True,
@@ -1014,9 +1194,9 @@ async def generate_video(request: VideoGenerationRequest):
                 video_data = base64.b64encode(f.read()).decode("utf-8")
             os.remove(output_path)
 
-        # Store job
+        # Store job in KV (video data may be large, shorter TTL)
         job_id = str(uuid.uuid4())
-        slideshow_jobs[job_id] = {
+        job_data = {
             "id": job_id,
             "type": "video",
             "status": "complete",
@@ -1026,6 +1206,7 @@ async def generate_video(request: VideoGenerationRequest):
             "slide_count": len(slides),
             "created_at": datetime.now().isoformat()
         }
+        await storage_set("slideshow_jobs", job_id, job_data, ex=3600)  # 1 hour (videos are large)
 
         return {
             "success": True,
@@ -1049,11 +1230,10 @@ async def generate_video(request: VideoGenerationRequest):
 
 @app.get("/api/v1/slides/{job_id}")
 async def get_slideshow_job(job_id: str):
-    """Get the result of a slideshow generation job"""
-    if job_id not in slideshow_jobs:
+    """Get the result of a slideshow generation job (from Vercel KV)"""
+    job = await storage_get("slideshow_jobs", job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    job = slideshow_jobs[job_id]
 
     # Return appropriate response based on job type
     if job["type"] == "slides":
@@ -1091,13 +1271,12 @@ async def get_slideshow_job(job_id: str):
 
 @app.get("/api/v1/slides/{job_id}/embed")
 async def get_slideshow_embed(job_id: str):
-    """Get embeddable HTML for a slideshow job"""
+    """Get embeddable HTML for a slideshow job (from Vercel KV)"""
     from fastapi.responses import HTMLResponse
 
-    if job_id not in slideshow_jobs:
+    job = await storage_get("slideshow_jobs", job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    job = slideshow_jobs[job_id]
 
     if job["type"] != "slideshow":
         raise HTTPException(
