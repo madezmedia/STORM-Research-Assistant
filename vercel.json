@@ -1,8 +1,8 @@
 {
-  "rewrites": [
-    {
-      "source": "/api/v1/:path*",
-      "destination": "https://storm-fast-api.vercel.app/api/v1/:path*"
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "buildCommand": "cd frontend && npm run build",
+  "outputDirectory": "frontend/.next",
+  "installCommand": "cd frontend && npm install",
+  "framework": "nextjs"
 }
