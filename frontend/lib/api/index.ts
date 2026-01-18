@@ -6,13 +6,29 @@ export { briefsApi, contentApi } from './briefs';
 export { geoApi } from './geo';
 export { slidesApi } from './slides';
 
-// Health check
-import { api } from './client';
+// Health check - uses root endpoints, not /api/v1
 import type { HealthStatus } from '@/types/api';
 
 export const healthApi = {
-  check: () => api.get<HealthStatus>('/'),
-  ping: () => api.get<{ status: string }>('/health'),
+  check: async (): Promise<HealthStatus> => {
+    // Health endpoint is at root, not /api/v1
+    const response = await fetch('/health');
+    if (!response.ok) {
+      throw new Error('Health check failed');
+    }
+    return response.json();
+  },
+  root: async (): Promise<HealthStatus> => {
+    // Root endpoint returns API info
+    const response = await fetch('/api/v1/health');
+    if (!response.ok) {
+      // Fallback to /health
+      const fallback = await fetch('/health');
+      if (!fallback.ok) throw new Error('Health check failed');
+      return fallback.json();
+    }
+    return response.json();
+  },
 };
 
 // Test endpoints
