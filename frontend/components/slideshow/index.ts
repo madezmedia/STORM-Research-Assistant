@@ -1,0 +1,1 @@
+export { SlideshowGenerator } from "./SlideshowGenerator";

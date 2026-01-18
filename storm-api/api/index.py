@@ -812,7 +812,8 @@ async def generate_slides(request: SlideGenerationRequest):
             content=request.content,
             options=options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
-            generate_images=request.generate_images
+            generate_images=request.generate_images,
+            zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
         # Store job for retrieval
@@ -874,7 +875,8 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
             content=request.content,
             options=slide_options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
-            generate_images=request.generate_images
+            generate_images=request.generate_images,
+            zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
         slides = slides_result.get("slides", [])
@@ -973,7 +975,8 @@ async def generate_video(request: VideoGenerationRequest):
             content=request.content,
             options=slide_options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
-            generate_images=True  # Required for video
+            generate_images=True,  # Required for video
+            zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
         slides = slides_result.get("slides", [])

@@ -419,7 +419,8 @@ async def generate_slideshow_content(
     content: str,
     options: Optional[SlideGenerationOptions] = None,
     gateway_url: str = "https://ai-gateway.vercel.sh/v1",
-    generate_images: bool = True
+    generate_images: bool = True,
+    zai_api_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Main function to generate slideshow content from text.
@@ -430,6 +431,7 @@ async def generate_slideshow_content(
         options: Slide generation options
         gateway_url: AI Gateway URL
         generate_images: Whether to generate actual images (set False for text-only)
+        zai_api_key: Z.AI API key for GLM-Image generation
 
     Returns:
         Dictionary with slides data and metadata
@@ -440,6 +442,7 @@ async def generate_slideshow_content(
 
     client = ImageGenerationClient(
         api_key=api_key,
+        zai_api_key=zai_api_key,
         gateway_url=gateway_url
     )
 
