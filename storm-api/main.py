@@ -991,15 +991,134 @@ async def start_generation(
     )
 
 
-async def run_generation_pipeline(brief_data: dict):
+async def run_generation_pipeline(brief_data: dict) -> None:
     """
-    Run the full content generation pipeline in the background.
+    Run the complete content generation pipeline asynchronously in the background.
 
-    Phases:
-    1. STORM Analysis - Break down topic into multi-perspective outline
-    2. Research - Gather web search results and local data
-    3. Generation - Write content sections using LLM
-    4. Optimization - SEO/GEO optimization and quality checks
+    This is the main orchestrator that manages the entire lifecycle of content generation
+    from a content brief to a finished, SEO-optimized article. It executes four sequential
+    phases with real-time progress tracking via Redis and persistent storage in PostgreSQL.
+
+    Pipeline Phases:
+    ----------------
+    1. **STORM Analysis** (Progress: 10% → 30%)
+       - Decomposes the topic into a multi-perspective outline using the STORM methodology
+       - Generates 7 diverse perspectives on the topic for comprehensive coverage
+       - Creates section structure with subsections and guiding questions
+       - Produces SEO-optimized title and meta description
+       - Calls: `analyze_topic()` from `app.analysis`
+
+    2. **Research** (Progress: 30% → 50%)
+       - Gathers web search results relevant to each section
+       - Collects local business data and landmarks if GEO targeting is enabled
+       - Aggregates statistics and supporting data for content enrichment
+       - Currently uses placeholder data; TODO: integrate actual web search APIs
+
+    3. **Content Generation** (Progress: 50% → 80%)
+       - Writes each section using LLM with research context
+       - Applies specified tone and word count targets from the brief
+       - Generates introduction and conclusion
+       - Extracts and compiles source URLs for citations
+       - Calls: `write_all_sections()` from `app.generation`
+
+    4. **Optimization** (Progress: 80% → 100%)
+       - Assembles all sections into final cohesive content
+       - Calculates SEO and quality scores
+       - Stores generated content and metadata in the database
+       - Updates brief status to 'complete'
+
+    Parameters:
+    -----------
+    brief_data : dict
+        A dictionary containing the content brief configuration with the following keys:
+
+        - **id** (str): UUID of the content brief (required)
+        - **topic** (str): Main topic/title for content generation (required)
+        - **content_type** (str): Type of content (e.g., 'blog-post', 'landing-page') (required)
+        - **seo** (dict | None): SEO configuration containing:
+            - `primary_keyword` (str): Main keyword to target
+            - `secondary_keywords` (List[str]): Supporting keywords
+        - **geo** (dict | None): GEO targeting configuration containing:
+            - `enabled` (bool): Whether GEO targeting is active
+            - `location` (dict): Location details (city, state, region)
+            - `local_keywords` (List[str]): Location-specific keywords
+        - **word_count** (int): Target word count for the article (required)
+        - **tone** (str): Writing tone (e.g., 'professional', 'casual') (required)
+        - **include_local_data** (bool): Whether to include local business/landmark data
+
+    Returns:
+    --------
+    None
+        This function runs asynchronously and does not return a value.
+        Results are persisted to the database and status is tracked via Redis.
+
+    Side Effects:
+    -------------
+    - **Database Writes**:
+        - Creates new `GeneratedContent` record with the finished article
+        - Updates `ContentBrief.status` to 'complete' or 'failed'
+    - **Redis Updates**:
+        - Publishes real-time progress updates to `generation:{brief_id}` key
+        - Status data includes: status, progress percentage, current phase, ETA
+
+    Error Handling:
+    ---------------
+    - All exceptions are caught and logged
+    - On failure, the brief status is set to 'failed' in the database
+    - Error details are published to Redis for frontend notification
+    - The function does not raise exceptions; errors are handled gracefully
+
+    Status Values:
+    --------------
+    The brief status progresses through these states:
+    - `analyzing`: STORM analysis in progress
+    - `researching`: Gathering research data
+    - `generating`: Writing content sections
+    - `optimizing`: Applying SEO/GEO enhancements
+    - `complete`: Generation finished successfully
+    - `failed`: An error occurred during generation
+
+    Example:
+    --------
+    This function is typically called from the `/api/v1/briefs/{brief_id}/generate` endpoint:
+
+    ```python
+    brief_data = {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "topic": "Best Coffee Shops in Seattle",
+        "content_type": "blog-post",
+        "seo": {
+            "primary_keyword": "Seattle coffee shops",
+            "secondary_keywords": ["best espresso Seattle", "local cafes"]
+        },
+        "geo": {
+            "enabled": True,
+            "location": {"city": "Seattle", "state": "Washington"},
+            "local_keywords": ["Capitol Hill", "Pike Place"]
+        },
+        "word_count": 2000,
+        "tone": "conversational",
+        "include_local_data": True,
+    }
+
+    # Start generation in background
+    asyncio.create_task(run_generation_pipeline(brief_data))
+    ```
+
+    Notes:
+    ------
+    - This function is designed to run as a background task via `asyncio.create_task()`
+    - Progress can be monitored via `GET /api/v1/briefs/{brief_id}/status`
+    - The generated content is retrievable via `GET /api/v1/content/{content_id}`
+    - For long-running generations, consider implementing timeout handling
+
+    See Also:
+    ---------
+    - `analyze_topic()`: Performs STORM analysis to generate content outline
+    - `write_all_sections()`: Generates content for each section
+    - `update_generation_status()`: Helper for Redis status updates
+    - `ContentBrief`: Database model for content briefs
+    - `GeneratedContent`: Database model for generated articles
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -1145,14 +1264,94 @@ async def run_generation_pipeline(brief_data: dict):
         await update_generation_status(brief_id, "failed", 0, f"Error: {str(e)}")
 
 
-async def update_generation_status(brief_id: str, status: str, progress: int, phase: str):
-    """Update generation status in Redis for real-time tracking"""
+async def update_generation_status(brief_id: str, status: str, progress: int, phase: str) -> None:
+    """
+    Update generation status in Redis for real-time progress tracking.
+
+    This helper function publishes status updates to Redis, enabling the frontend
+    to poll for real-time progress during content generation. Status data is stored
+    with a 1-hour TTL and can be retrieved via the `/api/v1/briefs/{brief_id}/status`
+    endpoint.
+
+    Parameters:
+    -----------
+    brief_id : str
+        UUID of the content brief being generated. Used as part of the Redis key:
+        `generation:{brief_id}`
+
+    status : str
+        Current status of the generation pipeline. Valid values:
+        - `analyzing`: STORM analysis phase
+        - `researching`: Research data collection phase
+        - `generating`: Content writing phase
+        - `optimizing`: SEO/GEO optimization phase
+        - `complete`: Generation finished successfully
+        - `failed`: An error occurred
+
+    progress : int
+        Percentage of completion (0-100). Typical milestones:
+        - 10: Starting STORM analysis
+        - 30: Research phase beginning
+        - 50: Content generation starting
+        - 80: Optimization phase
+        - 100: Complete
+
+    phase : str
+        Human-readable description of the current phase for display in the UI.
+        Examples: "STORM Analysis", "Research", "Content Generation", "Complete"
+
+    Returns:
+    --------
+    None
+
+    Side Effects:
+    -------------
+    - Stores status data in Redis at key `generation:{brief_id}`
+    - Data expires after 3600 seconds (1 hour)
+    - Silently catches and ignores Redis errors to prevent pipeline disruption
+
+    Redis Data Structure:
+    ---------------------
+    The following JSON structure is stored:
+    ```json
+    {
+        "status": "generating",
+        "progress": 50,
+        "current_phase": "Content Generation",
+        "estimated_time_remaining": 150
+    }
+    ```
+
+    Note:
+    -----
+    - Estimated time remaining is calculated as `(100 - progress) * 3` seconds
+    - Redis errors are silently suppressed; generation continues even if Redis fails
+    - This function is designed to be fire-and-forget with no return value
+
+    Example:
+    --------
+    ```python
+    # Update status to indicate research phase at 30% completion
+    await update_generation_status(
+        brief_id="550e8400-e29b-41d4-a716-446655440000",
+        status="researching",
+        progress=30,
+        phase="Research"
+    )
+    ```
+
+    See Also:
+    ---------
+    - `run_generation_pipeline()`: Main pipeline that calls this function
+    - `get_generation_status()`: API endpoint that retrieves this status data
+    - `GenerationStatusResponse`: Pydantic model for status response
+    """
     try:
         status_data = {
             "status": status,
             "progress": progress,
             "current_phase": phase,
-            "estimated_time_remaining": max(0, (100 - progress) * 3),  # Rough estimate
+            "estimated_time_remaining": max(0, (100 - progress) * 3),  # ~3 sec per 1% remaining
         }
         await redis_client.set(
             f"generation:{brief_id}",
@@ -1160,7 +1359,7 @@ async def update_generation_status(brief_id: str, status: str, progress: int, ph
             ex=3600,  # Expire after 1 hour
         )
     except Exception:
-        pass  # Redis errors shouldn't break generation
+        pass  # Redis errors shouldn't break generation - fail silently
 
 
 @app.get("/api/v1/briefs/{brief_id}/status", response_model=GenerationStatusResponse)
