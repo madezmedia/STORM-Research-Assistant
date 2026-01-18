@@ -1,9 +1,16 @@
 /**
  * API Client for STORM Backend
  * Provides typed, centralized API access
+ *
+ * Configuration:
+ * Set NEXT_PUBLIC_STORM_API_URL in Vercel environment variables to point to your backend.
+ * Example: https://storm-api-xxxx.vercel.app
  */
 
-const API_BASE = '/api/v1';
+// API base URL - use env var if set, otherwise relative path
+const API_BASE = process.env.NEXT_PUBLIC_STORM_API_URL
+  ? `${process.env.NEXT_PUBLIC_STORM_API_URL}/api/v1`
+  : '/api/v1';
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public data?: unknown) {
