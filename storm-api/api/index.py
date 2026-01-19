@@ -96,8 +96,16 @@ else:
 
 
 # =============================================================================
-# Storage Clients (Redis + Vercel KV)
+# Storage Clients (PostgreSQL + Redis + Vercel KV)
 # =============================================================================
+
+# Try to import asyncpg for direct PostgreSQL connections
+try:
+    import asyncpg
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+    print("Warning: asyncpg not available - PostgreSQL storage disabled")
 
 # Try to import redis for direct Redis connections
 try:
@@ -167,6 +175,148 @@ class RedisStorage:
             return await client.keys(pattern)
         except Exception as e:
             print(f"Redis keys error: {e}")
+        return []
+
+
+class PostgresStorage:
+    """
+    Direct PostgreSQL storage using asyncpg for permanent data persistence.
+
+    Designed for Vercel serverless with:
+    - Lazy connection initialization (cold start friendly)
+    - Connection pooling with conservative limits
+    - Automatic reconnection on failure
+    """
+
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        # Enable only if URL is provided and looks valid
+        self.enabled = bool(database_url) and POSTGRES_AVAILABLE and "..." not in database_url
+        self._pool = None
+
+    async def _get_pool(self):
+        """Lazily initialize connection pool on first use."""
+        if self._pool is None and self.enabled:
+            try:
+                self._pool = await asyncpg.create_pool(
+                    self.database_url,
+                    min_size=0,           # Serverless: no idle connections
+                    max_size=5,           # Conservative for shared functions
+                    command_timeout=30,   # Under Vercel's 60s limit
+                    server_settings={
+                        'jit': 'off',     # Faster cold starts
+                    }
+                )
+                print(f"PostgreSQL pool created successfully")
+            except Exception as e:
+                print(f"PostgreSQL pool creation failed: {e}")
+                self.enabled = False
+        return self._pool
+
+    async def get(self, table: str, key: str) -> Optional[Dict[str, Any]]:
+        """Get a record by ID from specified table."""
+        if not self.enabled:
+            return None
+        pool = await self._get_pool()
+        if not pool:
+            return None
+
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"SELECT data FROM {table} WHERE id = $1",
+                    key
+                )
+                if row:
+                    data = row['data']
+                    return json.loads(data) if isinstance(data, str) else data
+        except Exception as e:
+            print(f"PostgreSQL get error: {e}")
+        return None
+
+    async def set(self, table: str, key: str, value: Dict[str, Any]) -> bool:
+        """Insert or update a record in specified table."""
+        if not self.enabled:
+            return False
+        pool = await self._get_pool()
+        if not pool:
+            return False
+
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"""
+                    INSERT INTO {table} (id, data, created_at, updated_at)
+                    VALUES ($1, $2, NOW(), NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        data = EXCLUDED.data,
+                        updated_at = NOW()
+                    """,
+                    key, json.dumps(value)
+                )
+                return True
+        except Exception as e:
+            print(f"PostgreSQL set error: {e}")
+        return False
+
+    async def delete(self, table: str, key: str) -> bool:
+        """Delete a record from specified table."""
+        if not self.enabled:
+            return False
+        pool = await self._get_pool()
+        if not pool:
+            return False
+
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"DELETE FROM {table} WHERE id = $1", key
+                )
+                return True
+        except Exception as e:
+            print(f"PostgreSQL delete error: {e}")
+        return False
+
+    async def list(self, table: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """List all records from a table."""
+        if not self.enabled:
+            return []
+        pool = await self._get_pool()
+        if not pool:
+            return []
+
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT data FROM {table} ORDER BY created_at DESC LIMIT $1",
+                    limit
+                )
+                results = []
+                for row in rows:
+                    data = row['data']
+                    results.append(json.loads(data) if isinstance(data, str) else data)
+                return results
+        except Exception as e:
+            print(f"PostgreSQL list error: {e}")
+        return []
+
+    async def keys(self, table: str, limit: int = 1000) -> List[str]:
+        """Get all IDs from a table."""
+        if not self.enabled:
+            return []
+        pool = await self._get_pool()
+        if not pool:
+            return []
+
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT id FROM {table} ORDER BY created_at DESC LIMIT $1",
+                    limit
+                )
+                return [row['id'] for row in rows]
+        except Exception as e:
+            print(f"PostgreSQL keys error: {e}")
         return []
 
 
@@ -270,15 +420,28 @@ class KVStorage:
         return []
 
 
-# Initialize storage (prefer direct Redis, fallback to Vercel KV REST API)
+# Initialize storage clients
+# Priority: PostgreSQL (permanent) -> Redis (cache) -> Vercel KV -> Memory
+pg_storage = PostgresStorage(os.getenv("DATABASE_URL", ""))
 redis_storage = RedisStorage(os.getenv("REDIS_URL", ""))
 kv = KVStorage(settings.KV_REST_API_URL, settings.KV_REST_API_TOKEN)
 
-# Determine which storage to use
+# Namespace to PostgreSQL table mapping
+NAMESPACE_TABLE_MAP = {
+    "briefs": "kv_briefs",
+    "content": "kv_content",
+    "slideshow_jobs": "kv_slideshow_jobs",
+    "geo_analyses": "kv_geo_analyses",
+}
+
+# Determine primary storage type for logging
 STORAGE_TYPE = "memory"  # default
-if redis_storage.enabled:
+if pg_storage.enabled:
+    STORAGE_TYPE = "postgres"
+    print(f"Using PostgreSQL as primary storage (permanent)")
+elif redis_storage.enabled:
     STORAGE_TYPE = "redis"
-    print(f"Using direct Redis storage")
+    print(f"Using Redis as primary storage")
 elif kv.enabled:
     STORAGE_TYPE = "kv"
     print(f"Using Vercel KV storage")
@@ -294,39 +457,70 @@ _memory_store: Dict[str, Dict[str, Any]] = {
 
 
 async def storage_get(namespace: str, key: str) -> Optional[Dict[str, Any]]:
-    """Get from Redis/KV or fallback to memory"""
-    full_key = f"{namespace}:{key}"
+    """
+    Get from storage with priority: Redis cache -> PostgreSQL -> Vercel KV -> Memory.
 
-    # Try Redis first
+    Redis is checked first for fast cache hits. On cache miss, PostgreSQL is queried
+    and the result is cached in Redis for future requests.
+    """
+    full_key = f"{namespace}:{key}"
+    table = NAMESPACE_TABLE_MAP.get(namespace, f"kv_{namespace}")
+
+    # 1. Try Redis cache first (fast)
     if redis_storage.enabled:
         result = await redis_storage.get(full_key)
         if result is not None:
             return result
 
-    # Try Vercel KV
+    # 2. Try PostgreSQL (permanent storage)
+    if pg_storage.enabled:
+        result = await pg_storage.get(table, key)
+        if result is not None:
+            # Cache in Redis for future fast reads (7 day TTL)
+            if redis_storage.enabled:
+                await redis_storage.set(full_key, result, ex=604800)
+            return result
+
+    # 3. Try Vercel KV (fallback)
     if kv.enabled:
         result = await kv.get(full_key)
         if result is not None:
             return result
 
-    # Fallback to memory
+    # 4. Fallback to memory
     return _memory_store.get(namespace, {}).get(key)
 
 
-async def storage_set(namespace: str, key: str, value: Dict[str, Any], ex: int = 86400) -> bool:
-    """Set in Redis/KV and memory fallback"""
+async def storage_set(namespace: str, key: str, value: Dict[str, Any], ex: int = 604800) -> bool:
+    """
+    Set in storage with write-through: PostgreSQL (permanent) + Redis (cache).
+
+    Writes to PostgreSQL first for durability, then caches in Redis.
+    The `ex` parameter only affects Redis TTL - PostgreSQL data never expires.
+    """
     full_key = f"{namespace}:{key}"
+    table = NAMESPACE_TABLE_MAP.get(namespace, f"kv_{namespace}")
+    success = False
 
     # Always update memory for immediate reads in same invocation
     if namespace not in _memory_store:
         _memory_store[namespace] = {}
     _memory_store[namespace][key] = value
 
-    # Try Redis first
+    # 1. Write to PostgreSQL (permanent - no expiry)
+    if pg_storage.enabled:
+        success = await pg_storage.set(table, key, value)
+        if success:
+            # 2. Also cache in Redis for fast reads
+            if redis_storage.enabled:
+                await redis_storage.set(full_key, value, ex=ex)
+            return True
+
+    # 3. Fallback to Redis as primary if PostgreSQL unavailable
     if redis_storage.enabled:
         return await redis_storage.set(full_key, value, ex)
 
-    # Try Vercel KV
+    # 4. Fallback to Vercel KV
     if kv.enabled:
         return await kv.set(full_key, value, ex)
 
@@ -334,71 +528,104 @@ async def storage_set(namespace: str, key: str, value: Dict[str, Any], ex: int =
 
 
 async def storage_delete(namespace: str, key: str) -> bool:
-    """Delete from Redis/KV and memory"""
+    """
+    Delete from all storage layers: PostgreSQL, Redis, and memory.
+
+    Ensures data is removed from both permanent storage and cache.
+    """
     full_key = f"{namespace}:{key}"
+    table = NAMESPACE_TABLE_MAP.get(namespace, f"kv_{namespace}")
+
+    # Clear from memory
     if namespace in _memory_store and key in _memory_store[namespace]:
         del _memory_store[namespace][key]
 
-    # Try Redis first
-    if redis_storage.enabled:
-        return await redis_storage.delete(full_key)
+    # Delete from PostgreSQL (permanent)
+    if pg_storage.enabled:
+        await pg_storage.delete(table, key)
 
-    # Try Vercel KV
+    # Delete from Redis cache
+    if redis_storage.enabled:
+        await redis_storage.delete(full_key)
+
+    # Delete from Vercel KV
     if kv.enabled:
-        return await kv.delete(full_key)
+        await kv.delete(full_key)
 
     return True
 
 
-async def storage_list(namespace: str) -> List[Dict[str, Any]]:
-    """List all items in namespace"""
+async def storage_list(namespace: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    List all items in namespace from PostgreSQL (authoritative source).
+
+    Falls back to Redis/KV if PostgreSQL unavailable.
+    """
+    table = NAMESPACE_TABLE_MAP.get(namespace, f"kv_{namespace}")
     pattern = f"{namespace}:*"
 
-    # Try Redis first
+    # 1. Try PostgreSQL first (authoritative)
+    if pg_storage.enabled:
+        items = await pg_storage.list(table, limit)
+        if items:
+            return items
+
+    # 2. Fallback to Redis
     if redis_storage.enabled:
         keys = await redis_storage.keys(pattern)
         if keys:
             items = []
-            for key in keys:
+            for key in keys[:limit]:
                 item = await redis_storage.get(key)
                 if item:
                     items.append(item)
             return items
 
-    # Try Vercel KV
+    # 3. Fallback to Vercel KV
     if kv.enabled:
         keys = await kv.keys(pattern)
         if keys:
             items = []
-            for key in keys:
+            for key in keys[:limit]:
                 item = await kv.get(key)
                 if item:
                     items.append(item)
             return items
 
-    # Fallback to memory
-    return list(_memory_store.get(namespace, {}).values())
+    # 4. Fallback to memory
+    return list(_memory_store.get(namespace, {}).values())[:limit]
 
 
-async def storage_keys(namespace: str) -> List[str]:
-    """Get all keys in namespace (without prefix)"""
+async def storage_keys(namespace: str, limit: int = 1000) -> List[str]:
+    """
+    Get all keys in namespace from PostgreSQL (authoritative source).
+
+    Returns raw IDs without namespace prefix.
+    """
+    table = NAMESPACE_TABLE_MAP.get(namespace, f"kv_{namespace}")
     pattern = f"{namespace}:*"
     prefix = f"{namespace}:"
 
-    # Try Redis first
+    # 1. Try PostgreSQL first (authoritative)
+    if pg_storage.enabled:
+        keys = await pg_storage.keys(table, limit)
+        if keys:
+            return keys
+
+    # 2. Fallback to Redis
     if redis_storage.enabled:
         keys = await redis_storage.keys(pattern)
         if keys:
-            return [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
+            return [k[len(prefix):] if k.startswith(prefix) else k for k in keys[:limit]]
 
-    # Try Vercel KV
+    # 3. Fallback to Vercel KV
     if kv.enabled:
         keys = await kv.keys(pattern)
         if keys:
-            return [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
+            return [k[len(prefix):] if k.startswith(prefix) else k for k in keys[:limit]]
 
-    # Fallback to memory
-    return list(_memory_store.get(namespace, {}).keys())
+    # 4. Fallback to memory
+    return list(_memory_store.get(namespace, {}).keys())[:limit]
 
 
 # =============================================================================
@@ -669,9 +896,11 @@ async def health():
     return {
         "status": "healthy",
         "storage": {
-            "type": STORAGE_TYPE,
+            "primary": STORAGE_TYPE,
+            "postgres_enabled": pg_storage.enabled,
             "redis_enabled": redis_storage.enabled,
             "kv_enabled": kv.enabled,
+            "postgres_url_configured": bool(os.getenv("DATABASE_URL")),
             "redis_url_configured": bool(os.getenv("REDIS_URL")),
             "kv_url_configured": bool(settings.KV_REST_API_URL),
         }
