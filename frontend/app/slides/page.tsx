@@ -39,7 +39,7 @@ export default function SlidesPage() {
   const [style, setStyle] = useState('professional');
   const [theme, setTheme] = useState('business');
   const [duration, setDuration] = useState(5);
-  const [generateImages, setGenerateImages] = useState(true);
+  const [generateImages, setGenerateImages] = useState(false);  // Disabled by default - API rate limits
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [slideshow, setSlideshow] = useState<SlideshowResponse | null>(null);
@@ -72,7 +72,7 @@ export default function SlidesPage() {
         title: title || 'Untitled Presentation',
         style,
         theme,
-        slide_duration: duration,
+        duration,  // seconds per slide
         generate_images: generateImages,
       });
       setSlideshow(result);
