@@ -12,11 +12,17 @@ import json
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Depends, Security, status
+from fastapi.security import APIKeyHeader
 from fastapi.responses import StreamingResponse
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+
+# Rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # Settings
 class Settings(BaseSettings):
@@ -29,11 +35,46 @@ class Settings(BaseSettings):
     KV_REST_API_URL: str = ""
     KV_REST_API_TOKEN: str = ""
 
+    # API Security
+    STORM_API_KEY: str = ""  # Master API key for authentication
+    CORS_ORIGINS: str = "http://localhost:3000"  # Comma-separated allowed origins
+
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 settings = Settings()
+
+
+# =============================================================================
+# API Key Authentication
+# =============================================================================
+
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: str = Security(API_KEY_HEADER)) -> bool:
+    """
+    Validate API key from X-API-Key header.
+
+    If STORM_API_KEY is not configured, authentication is disabled (dev mode).
+    """
+    if not settings.STORM_API_KEY:
+        # No key configured = allow all (dev mode)
+        return True
+    if not api_key or api_key != settings.STORM_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "API key required in X-API-Key header"}
+        )
+    return True
+
+
+# =============================================================================
+# Rate Limiting
+# =============================================================================
+
+limiter = Limiter(key_func=get_remote_address)
 
 
 # =============================================================================
@@ -429,13 +470,21 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS
+# Rate limiter setup
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS - Hardened configuration
+ALLOWED_ORIGINS = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = ["http://localhost:3000"]  # Default fallback
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
 )
 
 # Pydantic Models
@@ -658,12 +707,12 @@ from datetime import datetime
 
 # Briefs endpoint
 class ContentBriefCreate(BaseModel):
-    topic: str
-    content_type: str = "blog_post"
-    word_count: int = 1500
-    tone: str = "professional"
+    topic: str = Field(..., min_length=3, max_length=500, description="Topic to write about")
+    content_type: str = Field(default="blog_post", max_length=50)
+    word_count: int = Field(default=1500, ge=100, le=10000)
+    tone: str = Field(default="professional", max_length=50)
     seo: Optional[Dict[str, Any]] = None
-    brand_direction: Optional[str] = None
+    brand_direction: Optional[str] = Field(default=None, max_length=2000)
     target_audience: Optional[Dict[str, Any]] = None
     include_examples: bool = True
     include_stats: bool = True
@@ -692,7 +741,12 @@ class GeneratedContentResponse(BaseModel):
     seo_score: Dict[str, Any]
 
 @app.post("/api/v1/briefs", response_model=ContentBriefResponse, status_code=201)
-async def create_brief(brief: ContentBriefCreate):
+@limiter.limit("60/hour")
+async def create_brief(
+    request: Request,
+    brief: ContentBriefCreate,
+    _: bool = Depends(verify_api_key)
+):
     """Create a new content brief (stored in Vercel KV)"""
     brief_id = str(uuid.uuid4())
     brief_data = {
@@ -715,12 +769,14 @@ async def create_brief(brief: ContentBriefCreate):
     )
 
 @app.get("/api/v1/briefs")
-async def list_briefs():
+@limiter.limit("120/hour")
+async def list_briefs(request: Request, _: bool = Depends(verify_api_key)):
     """List content briefs (from Vercel KV)"""
     return await storage_list("briefs")
 
 @app.get("/api/v1/briefs/{brief_id}")
-async def get_brief(brief_id: str):
+@limiter.limit("120/hour")
+async def get_brief(request: Request, brief_id: str, _: bool = Depends(verify_api_key)):
     """Get a single content brief by ID"""
     brief = await storage_get("briefs", brief_id)
     if not brief:
@@ -844,7 +900,13 @@ async def run_generation_pipeline(brief_id: str, brief: dict):
 
 
 @app.post("/api/v1/briefs/{brief_id}/generate", response_model=GenerationStatusResponse)
-async def generate_content_endpoint(brief_id: str, background_tasks: BackgroundTasks):
+@limiter.limit("60/hour")
+async def generate_content_endpoint(
+    request: Request,
+    brief_id: str,
+    background_tasks: BackgroundTasks,
+    _: bool = Depends(verify_api_key)
+):
     """Start STORM content generation for a brief (runs in background)"""
     brief = await storage_get("briefs", brief_id)
     if not brief:
@@ -879,7 +941,8 @@ async def generate_content_endpoint(brief_id: str, background_tasks: BackgroundT
 
 
 @app.get("/api/v1/briefs/{brief_id}/status", response_model=GenerationStatusResponse)
-async def get_generation_status(brief_id: str):
+@limiter.limit("120/hour")
+async def get_generation_status(request: Request, brief_id: str, _: bool = Depends(verify_api_key)):
     """Get the status of content generation (from Vercel KV)"""
     brief = await storage_get("briefs", brief_id)
     if not brief:
@@ -895,7 +958,8 @@ async def get_generation_status(brief_id: str):
 
 
 @app.get("/api/v1/briefs/{brief_id}/stream")
-async def stream_generation_status(brief_id: str):
+@limiter.limit("120/hour")
+async def stream_generation_status(request: Request, brief_id: str, _: bool = Depends(verify_api_key)):
     """
     Stream generation progress via Server-Sent Events (SSE).
 
@@ -954,7 +1018,8 @@ async def stream_generation_status(brief_id: str):
 
 
 @app.get("/api/v1/content/{brief_id}", response_model=GeneratedContentResponse)
-async def get_generated_content(brief_id: str):
+@limiter.limit("120/hour")
+async def get_generated_content(request: Request, brief_id: str, _: bool = Depends(verify_api_key)):
     """Get the generated content for a brief (from Vercel KV)"""
     content = await storage_get("content", brief_id)
     if not content:
@@ -1116,9 +1181,9 @@ slideshow_settings = SlideshowSettings()
 # Slideshow Request Models
 class SlideGenerationRequest(BaseModel):
     """Request to generate slides from content"""
-    content: str = Field(..., description="Blog post or article content")
+    content: str = Field(..., min_length=10, max_length=50000, description="Blog post or article content (max 50KB)")
     max_slides: int = Field(default=10, ge=1, le=20)
-    style: str = Field(default="professional")  # professional, minimalist, vibrant
+    style: str = Field(default="professional", max_length=50)  # professional, minimalist, vibrant
     brand_colors: Optional[Dict[str, str]] = None  # {primary: "#hex", secondary: "#hex"}
     include_title_slide: bool = True
     include_conclusion_slide: bool = True
@@ -1127,28 +1192,28 @@ class SlideGenerationRequest(BaseModel):
 
 class SlideshowGenerationRequest(BaseModel):
     """Request to generate HTML slideshow"""
-    content: str = Field(..., description="Blog post or article content")
+    content: str = Field(..., min_length=10, max_length=50000, description="Blog post or article content (max 50KB)")
     max_slides: int = Field(default=10, ge=1, le=20)
-    style: str = Field(default="professional")
+    style: str = Field(default="professional", max_length=50)
     autoplay: bool = True
     duration: int = Field(default=5, ge=1, le=30)  # seconds per slide
-    transition: str = Field(default="fade")  # fade, slide, zoom
+    transition: str = Field(default="fade", max_length=20)  # fade, slide, zoom
     show_controls: bool = True
     loop: bool = True
-    theme: str = Field(default="dark")  # dark, light
-    title: str = Field(default="Presentation")
+    theme: str = Field(default="dark", max_length=20)  # dark, light
+    title: str = Field(default="Presentation", max_length=200)
     generate_images: bool = True
 
 
 class VideoGenerationRequest(BaseModel):
     """Request to generate video from content"""
-    content: str = Field(..., description="Blog post or article content")
+    content: str = Field(..., min_length=10, max_length=50000, description="Blog post or article content (max 50KB)")
     max_slides: int = Field(default=10, ge=1, le=20)
-    style: str = Field(default="professional")
+    style: str = Field(default="professional", max_length=50)
     duration: int = Field(default=5, ge=1, le=30)  # seconds per slide
-    resolution: str = Field(default="1080p")  # 720p, 1080p, 4k
-    transition: str = Field(default="fade")
-    audio_path: Optional[str] = None
+    resolution: str = Field(default="1080p", max_length=10)  # 720p, 1080p, 4k
+    transition: str = Field(default="fade", max_length=20)
+    audio_path: Optional[str] = Field(default=None, max_length=500)
 
 
 # Slideshow jobs storage uses Vercel KV (see storage_get/storage_set above)
@@ -1166,7 +1231,13 @@ class BriefSlidesRequest(BaseModel):
 
 
 @app.post("/api/v1/briefs/{brief_id}/slides")
-async def generate_slides_from_brief(brief_id: str, request: BriefSlidesRequest):
+@limiter.limit("60/hour")
+async def generate_slides_from_brief(
+    request: Request,
+    brief_id: str,
+    slides_request: BriefSlidesRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Generate slideshow directly from a brief's generated content.
 
@@ -1201,8 +1272,8 @@ async def generate_slides_from_brief(brief_id: str, request: BriefSlidesRequest)
     try:
         # Create options object for slide generation
         slide_options = SlideGenerationOptions(
-            max_slides=request.max_slides,
-            style=request.style,
+            max_slides=slides_request.max_slides,
+            style=slides_request.style,
             include_title_slide=True,
             include_conclusion_slide=True
         )
@@ -1212,16 +1283,16 @@ async def generate_slides_from_brief(brief_id: str, request: BriefSlidesRequest)
             content=content_text,
             options=slide_options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
-            generate_images=request.generate_images,
+            generate_images=slides_request.generate_images,
             zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
         # 3. Generate HTML slideshow
         slideshow_options = SlideshowOptions(
-            autoplay=request.autoplay,
-            duration=request.duration,
-            transition=request.transition,
-            theme=request.theme,
+            autoplay=slides_request.autoplay,
+            duration=slides_request.duration,
+            transition=slides_request.transition,
+            theme=slides_request.theme,
             show_controls=True,
             loop=True
         )
@@ -1282,7 +1353,12 @@ async def get_slideshow_status():
 
 
 @app.post("/api/v1/slides/generate")
-async def generate_slides(request: SlideGenerationRequest):
+@limiter.limit("60/hour")
+async def generate_slides(
+    request: Request,
+    slide_request: SlideGenerationRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Generate slides from content using AI.
 
@@ -1304,20 +1380,20 @@ async def generate_slides(request: SlideGenerationRequest):
     try:
         # Create options
         options = SlideGenerationOptions(
-            max_slides=request.max_slides,
-            style=request.style,
-            brand_colors=request.brand_colors,
-            include_title_slide=request.include_title_slide,
-            include_conclusion_slide=request.include_conclusion_slide
+            max_slides=slide_request.max_slides,
+            style=slide_request.style,
+            brand_colors=slide_request.brand_colors,
+            include_title_slide=slide_request.include_title_slide,
+            include_conclusion_slide=slide_request.include_conclusion_slide
         )
 
         # Generate slideshow content
         result = await generate_slideshow_content(
             api_key=settings.OPENAI_API_KEY,
-            content=request.content,
+            content=slide_request.content,
             options=options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
-            generate_images=request.generate_images,
+            generate_images=slide_request.generate_images,
             zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
@@ -1348,7 +1424,12 @@ async def generate_slides(request: SlideGenerationRequest):
 
 
 @app.post("/api/v1/slides/slideshow")
-async def generate_slideshow(request: SlideshowGenerationRequest):
+@limiter.limit("60/hour")
+async def generate_slideshow(
+    request: Request,
+    slideshow_request: SlideshowGenerationRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Generate a self-contained HTML slideshow from content.
 
@@ -1370,18 +1451,18 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
     try:
         # Step 1: Generate slides
         slide_options = SlideGenerationOptions(
-            max_slides=request.max_slides,
-            style=request.style,
+            max_slides=slideshow_request.max_slides,
+            style=slideshow_request.style,
             include_title_slide=True,
             include_conclusion_slide=True
         )
 
         slides_result = await generate_slideshow_content(
             api_key=settings.OPENAI_API_KEY,
-            content=request.content,
+            content=slideshow_request.content,
             options=slide_options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
-            generate_images=request.generate_images,
+            generate_images=slideshow_request.generate_images,
             zai_api_key=slideshow_settings.ZAI_API_KEY
         )
 
@@ -1395,19 +1476,19 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
 
         # Step 2: Generate HTML slideshow
         slideshow_options = SlideshowOptions(
-            autoplay=request.autoplay,
-            duration=request.duration,
-            transition=request.transition,
-            show_controls=request.show_controls,
+            autoplay=slideshow_request.autoplay,
+            duration=slideshow_request.duration,
+            transition=slideshow_request.transition,
+            show_controls=slideshow_request.show_controls,
             show_progress=True,
-            loop=request.loop,
-            theme=request.theme
+            loop=slideshow_request.loop,
+            theme=slideshow_request.theme
         )
 
         html_content = generate_html_slideshow(
             slides=slides,
             options=slideshow_options,
-            title=request.title
+            title=slideshow_request.title
         )
 
         # Generate embed code
@@ -1419,13 +1500,13 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
             "id": job_id,
             "type": "slideshow",
             "status": "complete",
-            "title": request.title,
+            "title": slideshow_request.title,
             "html": html_content,
             "embed_code": embed_code,
             "slides": slides,
             "slide_count": len(slides),
-            "style": request.style,
-            "theme": request.theme,
+            "style": slideshow_request.style,
+            "theme": slideshow_request.theme,
             "created_at": datetime.now().isoformat()
         }
         await storage_set("slideshow_jobs", job_id, job_data, ex=604800)  # 7 days
@@ -1451,7 +1532,12 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
 
 
 @app.post("/api/v1/slides/video")
-async def generate_video(request: VideoGenerationRequest):
+@limiter.limit("10/hour")
+async def generate_video(
+    request: Request,
+    video_request: VideoGenerationRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Generate a video from content slides using FFmpeg.
 
@@ -1481,15 +1567,15 @@ async def generate_video(request: VideoGenerationRequest):
     try:
         # Step 1: Generate slides with images
         slide_options = SlideGenerationOptions(
-            max_slides=request.max_slides,
-            style=request.style,
+            max_slides=video_request.max_slides,
+            style=video_request.style,
             include_title_slide=True,
             include_conclusion_slide=True
         )
 
         slides_result = await generate_slideshow_content(
             api_key=settings.OPENAI_API_KEY,
-            content=request.content,
+            content=video_request.content,
             options=slide_options,
             gateway_url=settings.VERCEL_AI_GATEWAY_URL,
             generate_images=True,  # Required for video
@@ -1511,10 +1597,10 @@ async def generate_video(request: VideoGenerationRequest):
         video_result = await generate_video_from_slides(
             slides=slides,
             output_path=output_path,
-            duration=request.duration,
-            resolution=request.resolution,
-            transition=request.transition,
-            audio_path=request.audio_path
+            duration=video_request.duration,
+            resolution=video_request.resolution,
+            transition=video_request.transition,
+            audio_path=video_request.audio_path
         )
 
         if not video_result.get("success"):
@@ -1566,7 +1652,8 @@ async def generate_video(request: VideoGenerationRequest):
 
 
 @app.get("/api/v1/slides")
-async def list_slideshows():
+@limiter.limit("120/hour")
+async def list_slideshows(request: Request, _: bool = Depends(verify_api_key)):
     """List all stored slideshows"""
     try:
         jobs = await storage_keys("slideshow_jobs")
@@ -1599,7 +1686,8 @@ async def list_slideshows():
 
 
 @app.get("/api/v1/slides/{job_id}")
-async def get_slideshow_job(job_id: str):
+@limiter.limit("120/hour")
+async def get_slideshow_job(request: Request, job_id: str, _: bool = Depends(verify_api_key)):
     """Get the result of a slideshow generation job (from Vercel KV)"""
     job = await storage_get("slideshow_jobs", job_id)
     if not job:
@@ -1646,7 +1734,8 @@ async def get_slideshow_job(job_id: str):
 
 
 @app.get("/api/v1/slides/{job_id}/embed")
-async def get_slideshow_embed(job_id: str):
+@limiter.limit("120/hour")
+async def get_slideshow_embed(request: Request, job_id: str, _: bool = Depends(verify_api_key)):
     """Get embeddable HTML for a slideshow job (from Vercel KV)"""
     from fastapi.responses import HTMLResponse
 
@@ -1668,7 +1757,12 @@ async def get_slideshow_embed(job_id: str):
 # =============================================================================
 
 @app.post("/api/v1/geo/analyze-website", response_model=GEOAnalysisResponse, status_code=202)
-async def analyze_website(request: GEOAnalyzeRequest):
+@limiter.limit("60/hour")
+async def analyze_website(
+    request: Request,
+    geo_request: GEOAnalyzeRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Analyze a website to extract keywords, topics, and generate monitoring prompts.
 
@@ -1685,14 +1779,14 @@ async def analyze_website(request: GEOAnalyzeRequest):
 
     # Create analysis ID
     analysis_id = str(uuid.uuid4())
-    domain = request.url.split("//")[-1].split("/")[0]
+    domain = geo_request.url.split("//")[-1].split("/")[0]
 
     # Create initial analysis record
     analysis_data = {
         "id": analysis_id,
-        "brand_name": request.brand_name,
+        "brand_name": geo_request.brand_name,
         "domain": domain,
-        "competitors": request.competitors,
+        "competitors": geo_request.competitors,
         "status": "analyzing",
         "keywords": [],
         "topics": [],
@@ -1710,11 +1804,11 @@ async def analyze_website(request: GEOAnalyzeRequest):
 
     try:
         # Run the GEO pipeline (synchronous in serverless)
-        pipeline = GEOPipeline(brand_name=request.brand_name, use_keybert=True)
+        pipeline = GEOPipeline(brand_name=geo_request.brand_name, use_keybert=True)
         results = await pipeline.run_full_pipeline(
-            url=request.url,
-            crawl_limit=request.crawl_limit,
-            competitors=request.competitors,
+            url=geo_request.url,
+            crawl_limit=geo_request.crawl_limit,
+            competitors=geo_request.competitors,
         )
 
         # Update analysis with results
@@ -1739,7 +1833,7 @@ async def analyze_website(request: GEOAnalyzeRequest):
 
     return GEOAnalysisResponse(
         id=analysis_id,
-        brand_name=request.brand_name,
+        brand_name=geo_request.brand_name,
         domain=domain,
         keywords=analysis_data.get("keywords", []),
         topics=analysis_data.get("topics", []),
@@ -1754,7 +1848,8 @@ async def analyze_website(request: GEOAnalyzeRequest):
 
 
 @app.get("/api/v1/geo/analysis/{analysis_id}", response_model=GEOAnalysisResponse)
-async def get_geo_analysis(analysis_id: str):
+@limiter.limit("120/hour")
+async def get_geo_analysis(request: Request, analysis_id: str, _: bool = Depends(verify_api_key)):
     """Get GEO analysis results by ID (from Vercel KV)"""
     analysis = await storage_get("geo_analyses", analysis_id)
 
@@ -1778,7 +1873,12 @@ async def get_geo_analysis(analysis_id: str):
 
 
 @app.post("/api/v1/geo/generate-prompts", response_model=GEOPromptsResponse)
-async def generate_geo_prompts(request: GEOPromptRequest):
+@limiter.limit("120/hour")
+async def generate_geo_prompts(
+    request: Request,
+    prompt_request: GEOPromptRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Generate LLM monitoring prompts for brand tracking.
 
@@ -1794,15 +1894,15 @@ async def generate_geo_prompts(request: GEOPromptRequest):
             detail="GEO pipeline modules not available"
         )
 
-    generator = PromptGenerator(brand_name=request.brand_name)
+    generator = PromptGenerator(brand_name=prompt_request.brand_name)
     prompts = generator.generate_prompts(
-        keywords=request.keywords,
-        questions=request.questions,
-        competitors=request.competitors,
+        keywords=prompt_request.keywords,
+        questions=prompt_request.questions,
+        competitors=prompt_request.competitors,
     )
 
     return GEOPromptsResponse(
-        brand_name=request.brand_name,
+        brand_name=prompt_request.brand_name,
         prompt_count=len(prompts),
         prompts=[
             GEOPromptResponse(
@@ -1817,7 +1917,12 @@ async def generate_geo_prompts(request: GEOPromptRequest):
 
 
 @app.post("/api/v1/geo/track-response", response_model=GEOTrackResponse)
-async def track_llm_response(request: GEOTrackRequest):
+@limiter.limit("120/hour")
+async def track_llm_response(
+    request: Request,
+    track_request: GEOTrackRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Track brand and keyword mentions in an LLM response.
 
@@ -1833,13 +1938,13 @@ async def track_llm_response(request: GEOTrackRequest):
         )
 
     tracker = KeywordTracker(
-        brand_name=request.brand_name,
-        keywords=request.keywords,
+        brand_name=track_request.brand_name,
+        keywords=track_request.keywords,
     )
 
     results = tracker.analyze_response(
-        response_text=request.response_text,
-        prompt=request.prompt,
+        response_text=track_request.response_text,
+        prompt=track_request.prompt,
     )
 
     return GEOTrackResponse(
@@ -1852,7 +1957,8 @@ async def track_llm_response(request: GEOTrackRequest):
 
 
 @app.get("/api/v1/geo/keywords/{analysis_id}")
-async def get_geo_keywords(analysis_id: str):
+@limiter.limit("120/hour")
+async def get_geo_keywords(request: Request, analysis_id: str, _: bool = Depends(verify_api_key)):
     """Get extracted keywords from a GEO analysis (from Vercel KV)"""
     analysis = await storage_get("geo_analyses", analysis_id)
 
@@ -1868,11 +1974,16 @@ async def get_geo_keywords(analysis_id: str):
 
 
 @app.post("/api/v1/geo/export-gego", response_model=GEOExportResponse)
-async def export_gego_prompts(request: GEOExportRequest):
+@limiter.limit("120/hour")
+async def export_gego_prompts(
+    request: Request,
+    export_request: GEOExportRequest,
+    _: bool = Depends(verify_api_key)
+):
     """
     Export prompts in GEGO-compatible JSON format (from Vercel KV).
     """
-    analysis = await storage_get("geo_analyses", request.analysis_id)
+    analysis = await storage_get("geo_analyses", export_request.analysis_id)
 
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -1887,10 +1998,13 @@ async def export_gego_prompts(request: GEOExportRequest):
 
 
 @app.get("/api/v1/geo/analyses")
+@limiter.limit("120/hour")
 async def list_geo_analyses(
+    request: Request,
     skip: int = 0,
     limit: int = 50,
     brand_name: Optional[str] = None,
+    _: bool = Depends(verify_api_key)
 ):
     """List all GEO analyses (from Vercel KV)"""
     # Get all analyses from KV

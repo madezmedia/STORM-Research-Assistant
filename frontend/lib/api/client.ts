@@ -5,12 +5,17 @@
  * Configuration:
  * Set NEXT_PUBLIC_STORM_API_URL in Vercel environment variables to point to your backend.
  * Example: https://storm-api-xxxx.vercel.app
+ *
+ * Set NEXT_PUBLIC_STORM_API_KEY for API authentication.
  */
 
 // API base URL - use env var if set, otherwise relative path
 const API_BASE = process.env.NEXT_PUBLIC_STORM_API_URL
   ? `${process.env.NEXT_PUBLIC_STORM_API_URL}/api/v1`
   : '/api/v1';
+
+// API Key for authentication (optional - required when backend has STORM_API_KEY set)
+const API_KEY = process.env.NEXT_PUBLIC_STORM_API_KEY;
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public data?: unknown) {
@@ -39,6 +44,8 @@ class ApiClient {
       ...restOptions,
       headers: {
         'Content-Type': 'application/json',
+        // Include API key if configured
+        ...(API_KEY && { 'X-API-Key': API_KEY }),
         ...restOptions.headers,
       },
     };
@@ -53,6 +60,23 @@ class ApiClient {
       // Handle empty responses
       const text = await response.text();
       const data = text ? JSON.parse(text) : null;
+
+      // Handle specific error codes
+      if (response.status === 401) {
+        throw new ApiError(
+          data?.detail || 'Authentication required. Please check your API key.',
+          401,
+          data
+        );
+      }
+
+      if (response.status === 429) {
+        throw new ApiError(
+          data?.detail || 'Rate limit exceeded. Please try again later.',
+          429,
+          data
+        );
+      }
 
       if (!response.ok) {
         throw new ApiError(
