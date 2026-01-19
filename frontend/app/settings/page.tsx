@@ -152,7 +152,7 @@ export default function SettingsPage() {
                 <span className="text-sm text-muted-foreground">API Endpoint</span>
               </div>
               <code className="text-sm text-foreground">
-                {process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}
+                {process.env.NEXT_PUBLIC_STORM_API_URL || '/api/v1 (via proxy)'}
               </code>
             </div>
           </div>
