@@ -19,10 +19,25 @@ import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-# Rate limiting
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+# Rate limiting (optional - graceful fallback if not available)
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    RATE_LIMITING_AVAILABLE = True
+except ImportError:
+    print("Warning: slowapi not available - rate limiting disabled")
+    RATE_LIMITING_AVAILABLE = False
+    # Create dummy limiter that does nothing
+    class DummyLimiter:
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    Limiter = None
+    RateLimitExceeded = Exception
+    def get_remote_address(request):
+        return "127.0.0.1"
 
 # Settings
 class Settings(BaseSettings):
@@ -74,7 +89,10 @@ async def verify_api_key(api_key: str = Security(API_KEY_HEADER)) -> bool:
 # Rate Limiting
 # =============================================================================
 
-limiter = Limiter(key_func=get_remote_address)
+if RATE_LIMITING_AVAILABLE:
+    limiter = Limiter(key_func=get_remote_address)
+else:
+    limiter = DummyLimiter()
 
 
 # =============================================================================
@@ -470,9 +488,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Rate limiter setup
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Rate limiter setup (only if available)
+if RATE_LIMITING_AVAILABLE:
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS - Hardened configuration
 ALLOWED_ORIGINS = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
