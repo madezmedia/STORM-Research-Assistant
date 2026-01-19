@@ -11,3 +11,6 @@ httpx>=0.25.0
 # Rate limiting
 slowapi>=0.1.9
 limits>=3.0.0
+
+# Redis (for direct Redis connections)
+redis>=5.0.0

@@ -96,8 +96,79 @@ else:
 
 
 # =============================================================================
-# Vercel KV Storage Client
+# Storage Clients (Redis + Vercel KV)
 # =============================================================================
+
+# Try to import redis for direct Redis connections
+try:
+    import redis.asyncio as aioredis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    print("Warning: redis package not available - using Vercel KV or memory fallback")
+
+
+class RedisStorage:
+    """
+    Direct Redis storage client using redis-py.
+
+    Supports Redis Labs, Upstash, or any Redis-compatible service.
+    """
+
+    def __init__(self, url: str):
+        self.url = url
+        self.enabled = bool(url) and REDIS_AVAILABLE
+        self._client = None
+
+    async def _get_client(self):
+        if self._client is None and self.enabled:
+            self._client = aioredis.from_url(self.url, decode_responses=True)
+        return self._client
+
+    async def get(self, key: str) -> Optional[Dict[str, Any]]:
+        if not self.enabled:
+            return None
+        try:
+            client = await self._get_client()
+            result = await client.get(key)
+            if result:
+                return json.loads(result) if isinstance(result, str) else result
+        except Exception as e:
+            print(f"Redis get error: {e}")
+        return None
+
+    async def set(self, key: str, value: Dict[str, Any], ex: int = 86400) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            client = await self._get_client()
+            await client.set(key, json.dumps(value), ex=ex)
+            return True
+        except Exception as e:
+            print(f"Redis set error: {e}")
+        return False
+
+    async def delete(self, key: str) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            client = await self._get_client()
+            await client.delete(key)
+            return True
+        except Exception as e:
+            print(f"Redis delete error: {e}")
+        return False
+
+    async def keys(self, pattern: str = "*") -> List[str]:
+        if not self.enabled:
+            return []
+        try:
+            client = await self._get_client()
+            return await client.keys(pattern)
+        except Exception as e:
+            print(f"Redis keys error: {e}")
+        return []
+
 
 class KVStorage:
     """
@@ -108,7 +179,7 @@ class KVStorage:
     """
 
     def __init__(self, url: str, token: str):
-        self.url = url.rstrip('/')
+        self.url = url.rstrip('/') if url else ''
         self.token = token
         self.enabled = bool(url and token)
 
@@ -199,8 +270,20 @@ class KVStorage:
         return []
 
 
-# Initialize KV storage
+# Initialize storage (prefer direct Redis, fallback to Vercel KV REST API)
+redis_storage = RedisStorage(os.getenv("REDIS_URL", ""))
 kv = KVStorage(settings.KV_REST_API_URL, settings.KV_REST_API_TOKEN)
+
+# Determine which storage to use
+STORAGE_TYPE = "memory"  # default
+if redis_storage.enabled:
+    STORAGE_TYPE = "redis"
+    print(f"Using direct Redis storage")
+elif kv.enabled:
+    STORAGE_TYPE = "kv"
+    print(f"Using Vercel KV storage")
+else:
+    print("Warning: No persistent storage configured - using in-memory fallback")
 
 # Fallback in-memory storage (for local development without KV)
 _memory_store: Dict[str, Dict[str, Any]] = {
@@ -211,56 +294,109 @@ _memory_store: Dict[str, Dict[str, Any]] = {
 
 
 async def storage_get(namespace: str, key: str) -> Optional[Dict[str, Any]]:
-    """Get from KV or fallback to memory"""
+    """Get from Redis/KV or fallback to memory"""
     full_key = f"{namespace}:{key}"
-    result = await kv.get(full_key)
-    if result is not None:
-        return result
+
+    # Try Redis first
+    if redis_storage.enabled:
+        result = await redis_storage.get(full_key)
+        if result is not None:
+            return result
+
+    # Try Vercel KV
+    if kv.enabled:
+        result = await kv.get(full_key)
+        if result is not None:
+            return result
+
+    # Fallback to memory
     return _memory_store.get(namespace, {}).get(key)
 
 
 async def storage_set(namespace: str, key: str, value: Dict[str, Any], ex: int = 86400) -> bool:
-    """Set in KV and memory fallback"""
+    """Set in Redis/KV and memory fallback"""
     full_key = f"{namespace}:{key}"
+
     # Always update memory for immediate reads in same invocation
     if namespace not in _memory_store:
         _memory_store[namespace] = {}
     _memory_store[namespace][key] = value
-    # Try to persist to KV
-    return await kv.set(full_key, value, ex)
+
+    # Try Redis first
+    if redis_storage.enabled:
+        return await redis_storage.set(full_key, value, ex)
+
+    # Try Vercel KV
+    if kv.enabled:
+        return await kv.set(full_key, value, ex)
+
+    return True  # Memory-only mode
 
 
 async def storage_delete(namespace: str, key: str) -> bool:
-    """Delete from KV and memory"""
+    """Delete from Redis/KV and memory"""
     full_key = f"{namespace}:{key}"
     if namespace in _memory_store and key in _memory_store[namespace]:
         del _memory_store[namespace][key]
-    return await kv.delete(full_key)
+
+    # Try Redis first
+    if redis_storage.enabled:
+        return await redis_storage.delete(full_key)
+
+    # Try Vercel KV
+    if kv.enabled:
+        return await kv.delete(full_key)
+
+    return True
 
 
 async def storage_list(namespace: str) -> List[Dict[str, Any]]:
     """List all items in namespace"""
-    # Try KV first
-    keys = await kv.keys(f"{namespace}:*")
-    if keys:
-        items = []
-        for key in keys:
-            item = await kv.get(key)
-            if item:
-                items.append(item)
-        return items
+    pattern = f"{namespace}:*"
+
+    # Try Redis first
+    if redis_storage.enabled:
+        keys = await redis_storage.keys(pattern)
+        if keys:
+            items = []
+            for key in keys:
+                item = await redis_storage.get(key)
+                if item:
+                    items.append(item)
+            return items
+
+    # Try Vercel KV
+    if kv.enabled:
+        keys = await kv.keys(pattern)
+        if keys:
+            items = []
+            for key in keys:
+                item = await kv.get(key)
+                if item:
+                    items.append(item)
+            return items
+
     # Fallback to memory
     return list(_memory_store.get(namespace, {}).values())
 
 
 async def storage_keys(namespace: str) -> List[str]:
     """Get all keys in namespace (without prefix)"""
-    # Try KV first
-    keys = await kv.keys(f"{namespace}:*")
-    if keys:
-        # Strip namespace prefix from keys
-        prefix = f"{namespace}:"
-        return [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
+    pattern = f"{namespace}:*"
+    prefix = f"{namespace}:"
+
+    # Try Redis first
+    if redis_storage.enabled:
+        keys = await redis_storage.keys(pattern)
+        if keys:
+            return [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
+
+    # Try Vercel KV
+    if kv.enabled:
+        keys = await kv.keys(pattern)
+        if keys:
+            return [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
+
     # Fallback to memory
     return list(_memory_store.get(namespace, {}).keys())
 
@@ -533,7 +669,10 @@ async def health():
     return {
         "status": "healthy",
         "storage": {
+            "type": STORAGE_TYPE,
+            "redis_enabled": redis_storage.enabled,
             "kv_enabled": kv.enabled,
+            "redis_url_configured": bool(os.getenv("REDIS_URL")),
             "kv_url_configured": bool(settings.KV_REST_API_URL),
         }
     }
