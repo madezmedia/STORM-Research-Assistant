@@ -5,20 +5,12 @@ const nextConfig = {
 
   // Environment variables available on the client
   env: {
-    STORM_API_URL: process.env.STORM_API_URL || '',
+    STORM_API_URL: process.env.STORM_API_URL || 'http://localhost:8000',
   },
 
   // API rewrites for proxying to backend
-  // If STORM_API_URL is set, proxy to external backend
-  // If not set, requests go to same domain (for combined deployments)
   async rewrites() {
-    const apiUrl = process.env.STORM_API_URL;
-
-    // If no external API URL configured, don't set up rewrites
-    // This allows the app to work when backend is on same domain
-    if (!apiUrl) {
-      return [];
-    }
+    const apiUrl = process.env.STORM_API_URL || 'http://localhost:8000';
 
     return [
       {
