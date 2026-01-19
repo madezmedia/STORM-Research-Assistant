@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { PageHeader } from '@/components/layout';
 import { useBriefStore, useGenerationStore } from '@/stores';
+import { slidesApi } from '@/lib/api';
+import type { BriefSlidesResponse } from '@/lib/api/slides';
 import {
   ArrowLeft,
   Loader2,
@@ -15,29 +17,61 @@ import {
   FileText,
   Clock,
   Globe,
-  BarChart3
+  BarChart3,
+  Presentation,
+  X,
+  ExternalLink
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import ReactMarkdown from 'react-markdown';
 
 export default function StudioDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const briefId = params.id as string;
 
-  const { currentBrief, fetchBrief, isLoading: briefLoading } = useBriefStore();
-  const { status, progress, currentPhase, content, startPolling, stopPolling } = useGenerationStore();
+  const { currentBrief, currentContent, fetchBrief, fetchContent, isLoading: briefLoading } = useBriefStore();
+  const {
+    status,
+    progress,
+    currentPhase,
+    startStreaming,
+    startPolling,
+    stopTracking,
+    useSSE
+  } = useGenerationStore();
+
   const [copied, setCopied] = useState(false);
+  const [isGeneratingSlides, setIsGeneratingSlides] = useState(false);
+  const [slideshowData, setSlideshowData] = useState<BriefSlidesResponse | null>(null);
+  const [showSlideshowModal, setShowSlideshowModal] = useState(false);
+  const [slidesError, setSlidesError] = useState<string | null>(null);
+
+  // Use content from store or generation
+  const content = currentContent;
 
   useEffect(() => {
     if (briefId) {
       fetchBrief(briefId);
-      startPolling(briefId);
+      fetchContent(briefId);
+
+      // Use SSE streaming by default, with polling fallback
+      if (useSSE) {
+        startStreaming(briefId, () => {
+          // Refresh content when generation completes
+          fetchContent(briefId);
+        });
+      } else {
+        startPolling(briefId, () => {
+          fetchContent(briefId);
+        });
+      }
     }
 
     return () => {
-      stopPolling();
+      stopTracking();
     };
-  }, [briefId, fetchBrief, startPolling, stopPolling]);
+  }, [briefId, fetchBrief, fetchContent, startStreaming, startPolling, stopTracking, useSSE]);
 
   const handleCopy = async () => {
     if (content?.content) {
@@ -59,6 +93,50 @@ export default function StudioDetailPage() {
     }
   };
 
+  const handleGenerateSlides = async () => {
+    if (!briefId) return;
+
+    setIsGeneratingSlides(true);
+    setSlidesError(null);
+
+    try {
+      const response = await slidesApi.generateFromBrief(briefId, {
+        max_slides: 10,
+        style: 'professional',
+        generate_images: false,  // Disabled - image generation APIs have rate limits
+        theme: 'dark',
+        transition: 'fade',
+        duration: 5
+      });
+
+      setSlideshowData(response);
+      setShowSlideshowModal(true);
+    } catch (err) {
+      console.error('Failed to generate slides:', err);
+      setSlidesError(err instanceof Error ? err.message : 'Failed to generate slides');
+    } finally {
+      setIsGeneratingSlides(false);
+    }
+  };
+
+  const handleDownloadSlideshow = () => {
+    if (slideshowData?.html) {
+      const blob = new Blob([slideshowData.html], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${currentBrief?.topic || 'slideshow'}.html`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const handleCopyEmbed = async () => {
+    if (slideshowData?.embed_code) {
+      await navigator.clipboard.writeText(slideshowData.embed_code);
+    }
+  };
+
   if (briefLoading && !currentBrief) {
     return (
       <div className="animate-fade-in flex items-center justify-center min-h-[400px]">
@@ -70,7 +148,7 @@ export default function StudioDetailPage() {
     );
   }
 
-  const isGenerating = status === 'generating' || status === 'processing';
+  const isGenerating = ['generating', 'processing', 'analyzing', 'researching', 'optimizing'].includes(status || '');
   const isComplete = status === 'complete' || status === 'completed';
   const isFailed = status === 'failed';
 
@@ -100,7 +178,7 @@ export default function StudioDetailPage() {
                 <Loader2 className="h-6 w-6 text-primary animate-spin" />
                 <div>
                   <h3 className="font-semibold text-foreground">Generating Content</h3>
-                  <p className="text-sm text-muted-foreground">{currentPhase}</p>
+                  <p className="text-sm text-muted-foreground">{currentPhase || 'Processing...'}</p>
                 </div>
               </div>
 
@@ -115,19 +193,53 @@ export default function StudioDetailPage() {
                   {progress}%
                 </span>
               </div>
+
+              <p className="mt-3 text-xs text-muted-foreground">
+                {useSSE ? 'Streaming updates in real-time' : 'Checking progress every 2 seconds'}
+              </p>
             </div>
           )}
 
           {/* Status Banner */}
           {isComplete && (
             <div className="glass rounded-xl p-6 bg-success/10 border-success/30">
-              <div className="flex items-center gap-3">
-                <CheckCircle2 className="h-6 w-6 text-success" />
-                <div>
-                  <h3 className="font-semibold text-success">Generation Complete</h3>
-                  <p className="text-sm text-success/80">Your content is ready to view and export.</p>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <CheckCircle2 className="h-6 w-6 text-success" />
+                  <div>
+                    <h3 className="font-semibold text-success">Generation Complete</h3>
+                    <p className="text-sm text-success/80">Your content is ready to view and export.</p>
+                  </div>
                 </div>
+
+                {/* Generate Slides Button */}
+                <button
+                  onClick={handleGenerateSlides}
+                  disabled={isGeneratingSlides}
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors",
+                    isGeneratingSlides
+                      ? "bg-secondary text-muted-foreground cursor-not-allowed"
+                      : "bg-accent hover:bg-accent/90 text-accent-foreground"
+                  )}
+                >
+                  {isGeneratingSlides ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Presentation className="h-4 w-4" />
+                      Generate Slides
+                    </>
+                  )}
+                </button>
               </div>
+
+              {slidesError && (
+                <p className="mt-3 text-sm text-destructive">{slidesError}</p>
+              )}
             </div>
           )}
 
@@ -252,8 +364,78 @@ export default function StudioDetailPage() {
               </div>
             </div>
           )}
+
+          {/* Slideshow Quick Access */}
+          {slideshowData && (
+            <div className="glass rounded-xl p-6">
+              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                <Presentation className="h-4 w-4" />
+                Generated Slideshow
+              </h3>
+              <div className="space-y-3">
+                <button
+                  onClick={() => setShowSlideshowModal(true)}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-accent hover:bg-accent/90 text-accent-foreground font-medium transition-colors"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  View Slideshow
+                </button>
+                <button
+                  onClick={handleDownloadSlideshow}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-secondary hover:bg-secondary/80 text-foreground font-medium transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download HTML
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Slideshow Modal */}
+      {showSlideshowModal && slideshowData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="relative w-full max-w-5xl h-[80vh] mx-4">
+            {/* Modal Header */}
+            <div className="absolute top-0 left-0 right-0 flex items-center justify-between p-4 bg-background/90 backdrop-blur rounded-t-xl z-10">
+              <h3 className="font-semibold text-foreground">{slideshowData.title}</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleCopyEmbed}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-secondary hover:bg-secondary/80 text-foreground text-sm transition-colors"
+                >
+                  <Copy className="h-4 w-4" />
+                  Embed Code
+                </button>
+                <button
+                  onClick={handleDownloadSlideshow}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground text-sm transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download
+                </button>
+                <button
+                  onClick={() => setShowSlideshowModal(false)}
+                  className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Slideshow Preview */}
+            <div className="w-full h-full pt-16 rounded-xl overflow-hidden">
+              <iframe
+                srcDoc={slideshowData.html}
+                className="w-full h-full border-0 rounded-b-xl"
+                title="Slideshow Preview"
+                sandbox="allow-scripts"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

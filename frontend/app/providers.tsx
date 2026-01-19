@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { useAppStore } from '@/stores';
+import { GenerationStatusPanel } from '@/components/generation';
 
 interface ProvidersProps {
   children: React.ReactNode;
@@ -33,7 +34,13 @@ export function Providers({ children }: ProvidersProps) {
     }
   }, [sidebarCollapsed]);
 
-  return <>{children}</>;
+  return (
+    <>
+      {children}
+      {/* Global status panel for active generation jobs */}
+      <GenerationStatusPanel />
+    </>
+  );
 }
 
 export default Providers;

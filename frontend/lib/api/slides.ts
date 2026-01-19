@@ -12,6 +12,27 @@ import type {
   Slide,
 } from '@/types/api';
 
+export interface BriefSlidesRequest {
+  max_slides?: number;
+  style?: 'professional' | 'minimalist' | 'vibrant';
+  generate_images?: boolean;
+  autoplay?: boolean;
+  duration?: number;
+  transition?: 'fade' | 'slide' | 'zoom';
+  theme?: 'dark' | 'light';
+}
+
+export interface BriefSlidesResponse {
+  job_id: string;
+  brief_id: string;
+  status: string;
+  slide_count: number;
+  title: string;
+  html: string;
+  embed_code: string;
+  slides: Slide[];
+}
+
 export const slidesApi = {
   // Check capabilities
   getStatus: () =>
@@ -59,6 +80,21 @@ export const slidesApi = {
   // Get embed HTML (returns raw HTML)
   getEmbed: (jobId: string) =>
     fetch(`/api/v1/slides/${jobId}/embed`).then(r => r.text()),
+
+  /**
+   * Generate slideshow directly from a brief's generated content.
+   * The brief must have completed content generation first.
+   */
+  generateFromBrief: (briefId: string, options: BriefSlidesRequest = {}) =>
+    api.post<BriefSlidesResponse>(`/briefs/${briefId}/slides`, {
+      max_slides: options.max_slides ?? 10,
+      style: options.style ?? 'professional',
+      generate_images: options.generate_images ?? true,
+      autoplay: options.autoplay ?? true,
+      duration: options.duration ?? 5,
+      transition: options.transition ?? 'fade',
+      theme: options.theme ?? 'dark',
+    }),
 };
 
 export default slidesApi;

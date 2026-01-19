@@ -12,7 +12,9 @@ import json
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
+import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
@@ -705,121 +707,164 @@ async def list_briefs():
     """List content briefs (from Vercel KV)"""
     return await storage_list("briefs")
 
-@app.post("/api/v1/briefs/{brief_id}/generate")
-async def generate_content_endpoint(brief_id: str):
-    """Start STORM content generation for a brief with full research pipeline"""
+@app.get("/api/v1/briefs/{brief_id}")
+async def get_brief(brief_id: str):
+    """Get a single content brief by ID"""
     brief = await storage_get("briefs", brief_id)
     if not brief:
         raise HTTPException(status_code=404, detail="Brief not found")
-    topic = brief["topic"]
-    word_count = brief.get("word_count", 1500)
-    content_type = brief.get("content_type", "blog_post")
-    tone = brief.get("tone", "professional")
-
-    # =========================================================================
-    # PHASE 1: STORM Analysis - Generate outline with research queries (10%)
-    # =========================================================================
-    brief["status"] = "generating"
-    brief["progress"] = 10
-    brief["current_phase"] = "Generating STORM outline"
-    await storage_set("briefs", brief_id, brief, ex=604800)
-
-    outline = await generate_storm_outline(topic, content_type)
-    print(f"Generated outline with {len(outline.get('sections', []))} sections")
-
-    # =========================================================================
-    # PHASE 2: Research - Execute queries and gather sources (30%)
-    # =========================================================================
-    brief["progress"] = 30
-    brief["current_phase"] = "Researching topic"
-    await storage_set("briefs", brief_id, brief, ex=604800)
-
-    research_results = []
-    research_queries = outline.get("research_queries", [])[:5]  # Limit to 5 queries
-
-    for i, query in enumerate(research_queries):
-        print(f"Executing research query {i+1}/{len(research_queries)}: {query}")
-        results = await search_web(query, max_results=3)
-        research_results.extend(results)
-        # Update progress during research
-        brief["progress"] = 30 + int((i + 1) / len(research_queries) * 20)
-        await storage_set("briefs", brief_id, brief, ex=604800)
-
-    print(f"Gathered {len(research_results)} research sources")
-
-    # =========================================================================
-    # PHASE 3: Content Generation - Write with research context (60%)
-    # =========================================================================
-    brief["progress"] = 60
-    brief["current_phase"] = "Writing content"
-    await storage_set("briefs", brief_id, brief, ex=604800)
-
-    content = await generate_content_with_research(
-        topic=topic,
-        outline=outline,
-        research_results=research_results,
-        word_count=word_count,
-        tone=tone
+    return ContentBriefResponse(
+        id=brief.get("id", brief_id),
+        topic=brief.get("topic", ""),
+        content_type=brief.get("content_type", "blog post"),
+        status=brief.get("status", "pending"),
+        word_count=brief.get("word_count"),
+        tone=brief.get("tone"),
+        keywords=brief.get("keywords"),
+        target_audience=brief.get("target_audience"),
+        created_at=brief.get("created_at"),
     )
 
-    # =========================================================================
-    # PHASE 4: Finalize - Store and complete (100%)
-    # =========================================================================
-    brief["progress"] = 90
-    brief["current_phase"] = "Finalizing content"
-    await storage_set("briefs", brief_id, brief, ex=604800)
+async def run_generation_pipeline(brief_id: str, brief: dict):
+    """Background task to run the full STORM generation pipeline"""
+    try:
+        topic = brief["topic"]
+        word_count = brief.get("word_count", 1500)
+        content_type = brief.get("content_type", "blog_post")
+        tone = brief.get("tone", "professional")
 
-    # Count words
-    actual_word_count = len(content.split())
+        # =========================================================================
+        # PHASE 1: STORM Analysis - Generate outline with research queries (10%)
+        # =========================================================================
+        brief["status"] = "generating"
+        brief["progress"] = 10
+        brief["current_phase"] = "Generating STORM outline"
+        await storage_set("briefs", brief_id, brief, ex=604800)
 
-    # Extract sections from outline for response
-    sections = [
-        {
-            "heading": section.get("title", "Section"),
-            "perspective": section.get("perspective", "General"),
-            "content": "..."
+        outline = await generate_storm_outline(topic, content_type)
+        print(f"Generated outline with {len(outline.get('sections', []))} sections")
+
+        # =========================================================================
+        # PHASE 2: Research - Execute queries and gather sources (30%)
+        # =========================================================================
+        brief["progress"] = 30
+        brief["current_phase"] = "Researching topic"
+        await storage_set("briefs", brief_id, brief, ex=604800)
+
+        research_results = []
+        research_queries = outline.get("research_queries", [])[:5]  # Limit to 5 queries
+
+        for i, query in enumerate(research_queries):
+            print(f"Executing research query {i+1}/{len(research_queries)}: {query}")
+            results = await search_web(query, max_results=3)
+            research_results.extend(results)
+            brief["progress"] = 30 + int((i + 1) / len(research_queries) * 20)
+            await storage_set("briefs", brief_id, brief, ex=604800)
+
+        print(f"Gathered {len(research_results)} research sources")
+
+        # =========================================================================
+        # PHASE 3: Content Generation - Write with research context (60%)
+        # =========================================================================
+        brief["progress"] = 60
+        brief["current_phase"] = "Writing content"
+        await storage_set("briefs", brief_id, brief, ex=604800)
+
+        content = await generate_content_with_research(
+            topic=topic,
+            outline=outline,
+            research_results=research_results,
+            word_count=word_count,
+            tone=tone
+        )
+
+        # =========================================================================
+        # PHASE 4: Finalize - Store and complete (100%)
+        # =========================================================================
+        brief["progress"] = 90
+        brief["current_phase"] = "Finalizing content"
+        await storage_set("briefs", brief_id, brief, ex=604800)
+
+        actual_word_count = len(content.split())
+        sections = [
+            {
+                "heading": section.get("title", "Section"),
+                "perspective": section.get("perspective", "General"),
+                "content": "..."
+            }
+            for section in outline.get("sections", [])
+        ]
+        sources = list(set([r.get("url", "") for r in research_results if r.get("url")]))
+
+        content_id = str(uuid.uuid4())
+        content_data = {
+            "id": content_id,
+            "brief_id": brief_id,
+            "title": outline.get("title", topic),
+            "meta_description": outline.get("meta_description", ""),
+            "content": content,
+            "word_count": actual_word_count,
+            "sections": sections,
+            "sources": sources[:10],
+            "research_queries": research_queries,
+            "seo_score": {
+                "overall": 85 if research_results else 60,
+                "readability": 90,
+                "keyword_density": 80,
+                "sources_cited": len(sources)
+            },
+            "created_at": datetime.now().isoformat()
         }
-        for section in outline.get("sections", [])
-    ]
+        await storage_set("content", brief_id, content_data, ex=604800)
 
-    # Collect unique sources
-    sources = list(set([r.get("url", "") for r in research_results if r.get("url")]))
+        brief["status"] = "complete"
+        brief["progress"] = 100
+        brief["current_phase"] = "Complete"
+        brief["outline"] = outline
+        await storage_set("briefs", brief_id, brief, ex=604800)
+        print(f"Generation complete for brief {brief_id}")
 
-    # Store generated content in KV
-    content_id = str(uuid.uuid4())
-    content_data = {
-        "id": content_id,
-        "brief_id": brief_id,
-        "title": outline.get("title", topic),
-        "meta_description": outline.get("meta_description", ""),
-        "content": content,
-        "word_count": actual_word_count,
-        "sections": sections,
-        "sources": sources[:10],  # Top 10 sources
-        "research_queries": research_queries,
-        "seo_score": {
-            "overall": 85 if research_results else 60,
-            "readability": 90,
-            "keyword_density": 80,
-            "sources_cited": len(sources)
-        },
-        "created_at": datetime.now().isoformat()
-    }
-    await storage_set("content", brief_id, content_data, ex=604800)  # 7 days
+    except Exception as e:
+        print(f"Generation failed for brief {brief_id}: {e}")
+        brief["status"] = "failed"
+        brief["current_phase"] = f"Error: {str(e)}"
+        await storage_set("briefs", brief_id, brief, ex=604800)
 
-    # Update brief status
-    brief["status"] = "complete"
-    brief["progress"] = 100
-    brief["current_phase"] = "Complete"
-    brief["outline"] = outline
+
+@app.post("/api/v1/briefs/{brief_id}/generate", response_model=GenerationStatusResponse)
+async def generate_content_endpoint(brief_id: str, background_tasks: BackgroundTasks):
+    """Start STORM content generation for a brief (runs in background)"""
+    brief = await storage_get("briefs", brief_id)
+    if not brief:
+        raise HTTPException(status_code=404, detail="Brief not found")
+
+    # Check if already generating or complete
+    if brief.get("status") in ["generating", "complete"]:
+        return GenerationStatusResponse(
+            brief_id=brief_id,
+            status=brief.get("status", "unknown"),
+            progress=brief.get("progress", 0),
+            current_phase=brief.get("current_phase", "Unknown"),
+            estimated_time_remaining=0 if brief.get("status") == "complete" else 30
+        )
+
+    # Set initial status and start background task
+    brief["status"] = "generating"
+    brief["progress"] = 5
+    brief["current_phase"] = "Starting generation"
     await storage_set("briefs", brief_id, brief, ex=604800)
 
-    return {
-        "status": "started",
-        "brief_id": brief_id,
-        "research_sources": len(research_results),
-        "outline_sections": len(outline.get("sections", []))
-    }
+    # Run generation in background
+    asyncio.create_task(run_generation_pipeline(brief_id, brief))
+
+    return GenerationStatusResponse(
+        brief_id=brief_id,
+        status="generating",
+        progress=5,
+        current_phase="Starting generation",
+        estimated_time_remaining=30
+    )
+
 
 @app.get("/api/v1/briefs/{brief_id}/status", response_model=GenerationStatusResponse)
 async def get_generation_status(brief_id: str):
@@ -835,6 +880,66 @@ async def get_generation_status(brief_id: str):
         current_phase=brief.get("current_phase", "Unknown"),
         estimated_time_remaining=0 if brief.get("status") == "complete" else 5
     )
+
+
+@app.get("/api/v1/briefs/{brief_id}/stream")
+async def stream_generation_status(brief_id: str):
+    """
+    Stream generation progress via Server-Sent Events (SSE).
+
+    Provides real-time updates without polling. Client should use EventSource API.
+    """
+    async def event_generator():
+        last_status = None
+        consecutive_errors = 0
+        max_errors = 5
+
+        while True:
+            try:
+                brief = await storage_get("briefs", brief_id)
+
+                if not brief:
+                    yield f"data: {json.dumps({'error': 'Brief not found', 'status': 'failed'})}\n\n"
+                    break
+
+                current_status = {
+                    "brief_id": brief_id,
+                    "status": brief.get("status", "unknown"),
+                    "progress": brief.get("progress", 0),
+                    "current_phase": brief.get("current_phase", "Unknown"),
+                    "estimated_time_remaining": 0 if brief.get("status") == "complete" else 5
+                }
+
+                # Only send if status changed (or first update)
+                if current_status != last_status:
+                    yield f"data: {json.dumps(current_status)}\n\n"
+                    last_status = current_status
+
+                # Stop streaming when generation completes or fails
+                if current_status["status"] in ["complete", "completed", "failed"]:
+                    break
+
+                consecutive_errors = 0
+                await asyncio.sleep(1)  # Check every second
+
+            except Exception as e:
+                consecutive_errors += 1
+                yield f"data: {json.dumps({'error': str(e), 'status': 'error'})}\n\n"
+                if consecutive_errors >= max_errors:
+                    break
+                await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
+
 
 @app.get("/api/v1/content/{brief_id}", response_model=GeneratedContentResponse)
 async def get_generated_content(brief_id: str):
@@ -858,6 +963,103 @@ from pathlib import Path
 app_dir = Path(__file__).parent.parent / "app"
 if str(app_dir) not in sys.path:
     sys.path.insert(0, str(app_dir))
+
+# =============================================================================
+# GEO Pipeline Models & Imports
+# =============================================================================
+
+# Import GEO pipeline modules
+try:
+    from app.geo_pipeline import (
+        GEOPipeline, PromptGenerator, KeywordTracker
+    )
+    GEO_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"GEO modules not available: {e}")
+    GEO_MODULES_AVAILABLE = False
+
+
+# GEO Pydantic Models
+class GEOAnalyzeRequest(BaseModel):
+    """Request to analyze a website for GEO pipeline"""
+    url: str = Field(..., description="Website URL to analyze")
+    brand_name: str = Field(..., description="Brand name to track")
+    crawl_limit: int = Field(default=10, ge=1, le=50, description="Max pages to crawl")
+    competitors: Optional[List[str]] = Field(default=None, description="Known competitor names")
+
+
+class GEOAnalysisResponse(BaseModel):
+    """GEO analysis response"""
+    id: str
+    brand_name: str
+    domain: str
+    keywords: List[tuple] = []  # [(keyword, score), ...]
+    topics: List[str] = []
+    questions: List[str] = []
+    related_searches: List[str] = []
+    autocomplete: List[str] = []
+    pages_analyzed: int = 0
+    content_summary: str = ""
+    status: str
+    created_at: str = ""
+
+
+class GEOPromptRequest(BaseModel):
+    """Request to generate prompts"""
+    keywords: List[str] = Field(..., description="Target keywords")
+    questions: List[str] = Field(default_factory=list, description="PAA questions")
+    brand_name: str = Field(..., description="Brand name")
+    competitors: Optional[List[str]] = Field(default=None, description="Competitor names")
+
+
+class GEOPromptResponse(BaseModel):
+    """Generated prompt response"""
+    prompt_text: str
+    category: str
+    target_keywords: List[str]
+    expected_mention: str
+
+
+class GEOPromptsResponse(BaseModel):
+    """Response containing multiple prompts"""
+    brand_name: str
+    prompt_count: int
+    prompts: List[GEOPromptResponse]
+
+
+class GEOTrackRequest(BaseModel):
+    """Request to track LLM response"""
+    response_text: str = Field(..., description="LLM response text to analyze")
+    prompt: str = Field(..., description="Original prompt used")
+    llm_name: str = Field(..., description="Name of the LLM (e.g., 'gpt-4', 'claude-3')")
+    keywords: List[str] = Field(..., description="Keywords to track")
+    brand_name: str = Field(..., description="Brand name to track")
+
+
+class GEOTrackResponse(BaseModel):
+    """Keyword tracking response"""
+    brand_mentioned: bool
+    brand_mentions: Dict[str, Any]
+    keyword_mentions: Dict[str, Any]
+    total_mentions: int
+    position_score: float
+
+
+class GEOExportRequest(BaseModel):
+    """Request to export prompts in GEGO format"""
+    analysis_id: str = Field(..., description="Analysis ID to export prompts from")
+
+
+class GEOExportResponse(BaseModel):
+    """GEGO export response"""
+    brand_name: str
+    prompt_count: int
+    prompts: List[Dict[str, Any]]
+
+
+# =============================================================================
+# Slideshow/Video Generation Models & Imports
+# =============================================================================
 
 # Import slideshow modules
 try:
@@ -938,6 +1140,119 @@ class VideoGenerationRequest(BaseModel):
 
 
 # Slideshow jobs storage uses Vercel KV (see storage_get/storage_set above)
+
+
+class BriefSlidesRequest(BaseModel):
+    """Request to generate slides from a brief's generated content"""
+    max_slides: int = Field(default=10, ge=1, le=20)
+    style: str = Field(default="professional")  # professional, minimalist, vibrant
+    generate_images: bool = Field(default=True)
+    autoplay: bool = Field(default=True)
+    duration: int = Field(default=5, ge=1, le=30)  # seconds per slide
+    transition: str = Field(default="fade")  # fade, slide, zoom
+    theme: str = Field(default="dark")  # dark, light
+
+
+@app.post("/api/v1/briefs/{brief_id}/slides")
+async def generate_slides_from_brief(brief_id: str, request: BriefSlidesRequest):
+    """
+    Generate slideshow directly from a brief's generated content.
+
+    This endpoint combines content retrieval and slide generation into one step.
+    The brief must have completed content generation first.
+    """
+    if not SLIDESHOW_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Slideshow modules not available. Check server logs."
+        )
+
+    # 1. Get the generated content for this brief
+    content_data = await storage_get("content", brief_id)
+    if not content_data:
+        # Check if brief exists but content hasn't been generated
+        brief = await storage_get("briefs", brief_id)
+        if brief:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Content not yet generated for brief {brief_id}. Status: {brief.get('status', 'unknown')}"
+            )
+        raise HTTPException(status_code=404, detail="Brief not found")
+
+    content_text = content_data.get("content", "")
+    content_title = content_data.get("title", "Presentation")
+
+    if not content_text:
+        raise HTTPException(status_code=400, detail="Brief content is empty")
+
+    # 2. Generate slides using the existing pipeline
+    try:
+        # Create options object for slide generation
+        slide_options = SlideGenerationOptions(
+            max_slides=request.max_slides,
+            style=request.style,
+            include_title_slide=True,
+            include_conclusion_slide=True
+        )
+
+        slides_result = await generate_slideshow_content(
+            api_key=settings.OPENAI_API_KEY,
+            content=content_text,
+            options=slide_options,
+            gateway_url=settings.VERCEL_AI_GATEWAY_URL,
+            generate_images=request.generate_images,
+            zai_api_key=slideshow_settings.ZAI_API_KEY
+        )
+
+        # 3. Generate HTML slideshow
+        slideshow_options = SlideshowOptions(
+            autoplay=request.autoplay,
+            duration=request.duration,
+            transition=request.transition,
+            theme=request.theme,
+            show_controls=True,
+            loop=True
+        )
+
+        html_content = generate_html_slideshow(
+            slides=slides_result.get("slides", []),
+            options=slideshow_options,
+            title=content_title
+        )
+
+        embed_code = generate_embed_code(html_content, width=800, height=450)
+
+        # 4. Store job result
+        job_id = str(uuid.uuid4())
+        job_data = {
+            "id": job_id,
+            "brief_id": brief_id,
+            "type": "slideshow",
+            "status": "complete",
+            "slides": slides_result.get("slides", []),
+            "html": html_content,
+            "embed_code": embed_code,
+            "title": content_title,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        await storage_set("slideshow_jobs", job_id, job_data, ex=604800)  # 7 days
+
+        return {
+            "job_id": job_id,
+            "brief_id": brief_id,
+            "status": "complete",
+            "slide_count": len(slides_result.get("slides", [])),
+            "title": content_title,
+            "html": html_content,
+            "embed_code": embed_code,
+            "slides": slides_result.get("slides", [])
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Slide generation failed: {str(e)}"
+        )
 
 
 @app.get("/api/v1/slides/status")
@@ -1285,3 +1600,264 @@ async def get_slideshow_embed(job_id: str):
         )
 
     return HTMLResponse(content=job.get("html", ""), media_type="text/html")
+
+
+# =============================================================================
+# GEO Pipeline Endpoints
+# =============================================================================
+
+@app.post("/api/v1/geo/analyze-website", response_model=GEOAnalysisResponse, status_code=202)
+async def analyze_website(request: GEOAnalyzeRequest):
+    """
+    Analyze a website to extract keywords, topics, and generate monitoring prompts.
+
+    Uses Vercel KV for storage. Analysis runs synchronously (no background tasks in serverless).
+    """
+    import uuid
+    from datetime import datetime
+
+    if not GEO_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="GEO pipeline modules not available"
+        )
+
+    # Create analysis ID
+    analysis_id = str(uuid.uuid4())
+    domain = request.url.split("//")[-1].split("/")[0]
+
+    # Create initial analysis record
+    analysis_data = {
+        "id": analysis_id,
+        "brand_name": request.brand_name,
+        "domain": domain,
+        "competitors": request.competitors,
+        "status": "analyzing",
+        "keywords": [],
+        "topics": [],
+        "questions": [],
+        "related_searches": [],
+        "autocomplete": [],
+        "pages_analyzed": 0,
+        "content_summary": "",
+        "prompts": [],
+        "created_at": datetime.now().isoformat()
+    }
+
+    # Store initial state
+    await storage_set("geo_analyses", analysis_id, analysis_data, ex=604800)  # 7 days
+
+    try:
+        # Run the GEO pipeline (synchronous in serverless)
+        pipeline = GEOPipeline(brand_name=request.brand_name, use_keybert=True)
+        results = await pipeline.run_full_pipeline(
+            url=request.url,
+            crawl_limit=request.crawl_limit,
+            competitors=request.competitors,
+        )
+
+        # Update analysis with results
+        analysis_data.update({
+            "keywords": results["analysis"]["keywords"],
+            "topics": results["analysis"]["topics"],
+            "questions": results["research"]["paa_questions"],
+            "related_searches": results["research"]["related_searches"],
+            "autocomplete": results["research"]["autocomplete"],
+            "prompts": results["prompts"],
+            "content_summary": results["analysis"]["content_summary"],
+            "pages_analyzed": results["analysis"]["pages_analyzed"],
+            "status": "complete"
+        })
+        await storage_set("geo_analyses", analysis_id, analysis_data, ex=604800)
+
+    except Exception as e:
+        import traceback
+        analysis_data["status"] = "failed"
+        analysis_data["error_message"] = f"{str(e)}\n{traceback.format_exc()}"
+        await storage_set("geo_analyses", analysis_id, analysis_data, ex=604800)
+
+    return GEOAnalysisResponse(
+        id=analysis_id,
+        brand_name=request.brand_name,
+        domain=domain,
+        keywords=analysis_data.get("keywords", []),
+        topics=analysis_data.get("topics", []),
+        questions=analysis_data.get("questions", []),
+        related_searches=analysis_data.get("related_searches", []),
+        autocomplete=analysis_data.get("autocomplete", []),
+        pages_analyzed=analysis_data.get("pages_analyzed", 0),
+        content_summary=analysis_data.get("content_summary", ""),
+        status=analysis_data["status"],
+        created_at=analysis_data["created_at"]
+    )
+
+
+@app.get("/api/v1/geo/analysis/{analysis_id}", response_model=GEOAnalysisResponse)
+async def get_geo_analysis(analysis_id: str):
+    """Get GEO analysis results by ID (from Vercel KV)"""
+    analysis = await storage_get("geo_analyses", analysis_id)
+
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    return GEOAnalysisResponse(
+        id=analysis.get("id", analysis_id),
+        brand_name=analysis.get("brand_name", ""),
+        domain=analysis.get("domain", ""),
+        keywords=analysis.get("keywords", []),
+        topics=analysis.get("topics", []),
+        questions=analysis.get("questions", []),
+        related_searches=analysis.get("related_searches", []),
+        autocomplete=analysis.get("autocomplete", []),
+        pages_analyzed=analysis.get("pages_analyzed", 0),
+        content_summary=analysis.get("content_summary", ""),
+        status=analysis.get("status", "unknown"),
+        created_at=analysis.get("created_at", "")
+    )
+
+
+@app.post("/api/v1/geo/generate-prompts", response_model=GEOPromptsResponse)
+async def generate_geo_prompts(request: GEOPromptRequest):
+    """
+    Generate LLM monitoring prompts for brand tracking.
+
+    Returns prompts in various categories:
+    - direct_mention: Questions about the brand
+    - comparison: Brand vs competitors
+    - recommendation: Category recommendations
+    - feature_inquiry: Feature-specific questions
+    """
+    if not GEO_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="GEO pipeline modules not available"
+        )
+
+    generator = PromptGenerator(brand_name=request.brand_name)
+    prompts = generator.generate_prompts(
+        keywords=request.keywords,
+        questions=request.questions,
+        competitors=request.competitors,
+    )
+
+    return GEOPromptsResponse(
+        brand_name=request.brand_name,
+        prompt_count=len(prompts),
+        prompts=[
+            GEOPromptResponse(
+                prompt_text=p.prompt_text,
+                category=p.category,
+                target_keywords=p.target_keywords,
+                expected_mention=p.expected_mention,
+            )
+            for p in prompts
+        ],
+    )
+
+
+@app.post("/api/v1/geo/track-response", response_model=GEOTrackResponse)
+async def track_llm_response(request: GEOTrackRequest):
+    """
+    Track brand and keyword mentions in an LLM response.
+
+    Analyzes the response for:
+    - Direct brand mentions
+    - Keyword occurrences
+    - Position tracking (earlier = better)
+    """
+    if not GEO_MODULES_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="GEO pipeline modules not available"
+        )
+
+    tracker = KeywordTracker(
+        brand_name=request.brand_name,
+        keywords=request.keywords,
+    )
+
+    results = tracker.analyze_response(
+        response_text=request.response_text,
+        prompt=request.prompt,
+    )
+
+    return GEOTrackResponse(
+        brand_mentioned=results["brand_mentioned"],
+        brand_mentions=results["brand_mentions"],
+        keyword_mentions=results["keyword_mentions"],
+        total_mentions=results["total_mentions"],
+        position_score=results["position_score"],
+    )
+
+
+@app.get("/api/v1/geo/keywords/{analysis_id}")
+async def get_geo_keywords(analysis_id: str):
+    """Get extracted keywords from a GEO analysis (from Vercel KV)"""
+    analysis = await storage_get("geo_analyses", analysis_id)
+
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    return {
+        "analysis_id": analysis.get("id", analysis_id),
+        "brand_name": analysis.get("brand_name", ""),
+        "keywords": analysis.get("keywords", []),
+        "topics": analysis.get("topics", []),
+    }
+
+
+@app.post("/api/v1/geo/export-gego", response_model=GEOExportResponse)
+async def export_gego_prompts(request: GEOExportRequest):
+    """
+    Export prompts in GEGO-compatible JSON format (from Vercel KV).
+    """
+    analysis = await storage_get("geo_analyses", request.analysis_id)
+
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    prompts = analysis.get("prompts", [])
+
+    return GEOExportResponse(
+        brand_name=analysis.get("brand_name", ""),
+        prompt_count=len(prompts),
+        prompts=prompts,
+    )
+
+
+@app.get("/api/v1/geo/analyses")
+async def list_geo_analyses(
+    skip: int = 0,
+    limit: int = 50,
+    brand_name: Optional[str] = None,
+):
+    """List all GEO analyses (from Vercel KV)"""
+    # Get all analyses from KV
+    all_analyses = await storage_list("geo_analyses")
+
+    # Filter by brand_name if specified
+    if brand_name:
+        all_analyses = [a for a in all_analyses if a.get("brand_name") == brand_name]
+
+    # Sort by created_at descending
+    all_analyses.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    # Apply pagination
+    paginated = all_analyses[skip:skip + limit]
+
+    return {
+        "count": len(paginated),
+        "total": len(all_analyses),
+        "analyses": [
+            {
+                "id": a.get("id"),
+                "brand_name": a.get("brand_name"),
+                "domain": a.get("domain"),
+                "status": a.get("status"),
+                "pages_analyzed": a.get("pages_analyzed", 0),
+                "keyword_count": len(a.get("keywords", [])),
+                "created_at": a.get("created_at", ""),
+            }
+            for a in paginated
+        ],
+    }
