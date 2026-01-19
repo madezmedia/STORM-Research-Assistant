@@ -194,6 +194,18 @@ async def storage_list(namespace: str) -> List[Dict[str, Any]]:
     return list(_memory_store.get(namespace, {}).values())
 
 
+async def storage_keys(namespace: str) -> List[str]:
+    """Get all keys in namespace (without prefix)"""
+    # Try KV first
+    keys = await kv.keys(f"{namespace}:*")
+    if keys:
+        # Strip namespace prefix from keys
+        prefix = f"{namespace}:"
+        return [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
+    # Fallback to memory
+    return list(_memory_store.get(namespace, {}).keys())
+
+
 # =============================================================================
 # Tavily Web Search
 # =============================================================================
@@ -1398,25 +1410,35 @@ async def generate_slideshow(request: SlideshowGenerationRequest):
             title=request.title
         )
 
-        # Store job in KV
+        # Generate embed code
+        embed_code = generate_embed_code(html_content, width=800, height=450)
+
+        # Store job in KV with complete data
         job_id = str(uuid.uuid4())
         job_data = {
             "id": job_id,
             "type": "slideshow",
             "status": "complete",
+            "title": request.title,
             "html": html_content,
+            "embed_code": embed_code,
+            "slides": slides,
             "slide_count": len(slides),
+            "style": request.style,
+            "theme": request.theme,
             "created_at": datetime.now().isoformat()
         }
-        await storage_set("slideshow_jobs", job_id, job_data, ex=86400)  # 24 hours
+        await storage_set("slideshow_jobs", job_id, job_data, ex=604800)  # 7 days
 
         return {
             "success": True,
             "job_id": job_id,
             "slide_count": len(slides),
             "format": "html",
+            "title": request.title,
             "html": html_content,
-            "embed_code": f'<iframe src="/api/v1/slides/{job_id}/embed" width="800" height="450" frameborder="0" allowfullscreen></iframe>'
+            "embed_code": embed_code,
+            "slides": slides
         }
 
     except HTTPException:
@@ -1543,6 +1565,39 @@ async def generate_video(request: VideoGenerationRequest):
         )
 
 
+@app.get("/api/v1/slides")
+async def list_slideshows():
+    """List all stored slideshows"""
+    try:
+        jobs = await storage_keys("slideshow_jobs")
+        slideshows = []
+
+        for job_id in jobs:
+            job = await storage_get("slideshow_jobs", job_id)
+            if job and job.get("type") == "slideshow":
+                # Return summary without full HTML to keep response small
+                slideshows.append({
+                    "id": job.get("id"),
+                    "title": job.get("title", "Untitled"),
+                    "slide_count": job.get("slide_count", 0),
+                    "style": job.get("style", "professional"),
+                    "theme": job.get("theme", "dark"),
+                    "brief_id": job.get("brief_id"),
+                    "created_at": job.get("created_at")
+                })
+
+        # Sort by created_at descending (newest first)
+        slideshows.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+        return {
+            "slideshows": slideshows,
+            "total": len(slideshows)
+        }
+    except Exception as e:
+        print(f"Error listing slideshows: {e}")
+        return {"slideshows": [], "total": 0}
+
+
 @app.get("/api/v1/slides/{job_id}")
 async def get_slideshow_job(job_id: str):
     """Get the result of a slideshow generation job (from Vercel KV)"""
@@ -1565,8 +1620,14 @@ async def get_slideshow_job(job_id: str):
             "id": job["id"],
             "type": job["type"],
             "status": job["status"],
+            "title": job.get("title", "Untitled"),
             "html": job.get("html"),
+            "embed_code": job.get("embed_code"),
+            "slides": job.get("slides", []),
             "slide_count": job.get("slide_count", 0),
+            "style": job.get("style"),
+            "theme": job.get("theme"),
+            "brief_id": job.get("brief_id"),
             "created_at": job["created_at"]
         }
     elif job["type"] == "video":

@@ -33,6 +33,36 @@ export interface BriefSlidesResponse {
   slides: Slide[];
 }
 
+export interface SlideshowSummary {
+  id: string;
+  title: string;
+  slide_count: number;
+  style: string;
+  theme: string;
+  brief_id?: string;
+  created_at: string;
+}
+
+export interface SlideshowListResponse {
+  slideshows: SlideshowSummary[];
+  total: number;
+}
+
+export interface SlideshowDetail {
+  id: string;
+  type: string;
+  status: string;
+  title: string;
+  html: string;
+  embed_code: string;
+  slides: Slide[];
+  slide_count: number;
+  style: string;
+  theme: string;
+  brief_id?: string;
+  created_at: string;
+}
+
 export const slidesApi = {
   // Check capabilities
   getStatus: () =>
@@ -41,6 +71,14 @@ export const slidesApi = {
   // Alias for getStatus
   getCapabilities: () =>
     api.get<SlidesCapabilities>('/slides/status'),
+
+  // List all saved slideshows
+  list: () =>
+    api.get<SlideshowListResponse>('/slides'),
+
+  // Get a specific slideshow by ID
+  getSlideshow: (id: string) =>
+    api.get<SlideshowDetail>(`/slides/${id}`),
 
   // Generate slides
   generate: (data: SlideGenerationRequest) =>

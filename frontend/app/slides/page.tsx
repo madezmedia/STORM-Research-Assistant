@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { PageHeader } from '@/components/layout';
 import { slidesApi } from '@/lib/api';
+import type { SlideshowSummary, SlideshowDetail } from '@/lib/api/slides';
 import { SlidesCapabilities, SlideshowResponse } from '@/types/api';
 import {
   Presentation,
@@ -14,7 +15,10 @@ import {
   Clock,
   Palette,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  History,
+  ExternalLink,
+  X
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -45,6 +49,12 @@ export default function SlidesPage() {
   const [slideshow, setSlideshow] = useState<SlideshowResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Saved slideshows state
+  const [savedSlideshows, setSavedSlideshows] = useState<SlideshowSummary[]>([]);
+  const [loadingSaved, setLoadingSaved] = useState(true);
+  const [selectedSlideshow, setSelectedSlideshow] = useState<SlideshowDetail | null>(null);
+  const [loadingSlideshow, setLoadingSlideshow] = useState(false);
+
   useEffect(() => {
     // Check capabilities on mount
     slidesApi.getCapabilities()
@@ -57,7 +67,34 @@ export default function SlidesPage() {
         });
       })
       .catch(console.error);
+
+    // Load saved slideshows
+    loadSavedSlideshows();
   }, []);
+
+  const loadSavedSlideshows = async () => {
+    setLoadingSaved(true);
+    try {
+      const result = await slidesApi.list();
+      setSavedSlideshows(result.slideshows || []);
+    } catch (err) {
+      console.error('Failed to load saved slideshows:', err);
+    } finally {
+      setLoadingSaved(false);
+    }
+  };
+
+  const viewSlideshow = async (id: string) => {
+    setLoadingSlideshow(true);
+    try {
+      const detail = await slidesApi.getSlideshow(id);
+      setSelectedSlideshow(detail);
+    } catch (err) {
+      console.error('Failed to load slideshow:', err);
+    } finally {
+      setLoadingSlideshow(false);
+    }
+  };
 
   const handleGenerate = async () => {
     if (!content.trim()) return;
@@ -76,6 +113,8 @@ export default function SlidesPage() {
         generate_images: generateImages,
       });
       setSlideshow(result);
+      // Refresh saved slideshows list
+      loadSavedSlideshows();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Generation failed');
     } finally {
@@ -334,6 +373,129 @@ export default function SlidesPage() {
           </div>
         </div>
       </div>
+
+      {/* Saved Slideshows Section */}
+      <div className="mt-8">
+        <div className="glass rounded-xl p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-xl font-semibold text-foreground flex items-center gap-2">
+              <History className="h-5 w-5 text-accent" />
+              Previous Slideshows
+            </h2>
+            <span className="text-sm text-muted-foreground">
+              {savedSlideshows.length} saved
+            </span>
+          </div>
+
+          {loadingSaved ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : savedSlideshows.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              <Presentation className="h-12 w-12 mx-auto mb-3 opacity-50" />
+              <p>No saved slideshows yet</p>
+              <p className="text-sm mt-1">Generated slideshows will appear here</p>
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {savedSlideshows.map((ss) => (
+                <div
+                  key={ss.id}
+                  className="p-4 rounded-lg bg-secondary/30 border border-border hover:border-primary/50 transition-colors"
+                >
+                  <div className="flex items-start justify-between mb-2">
+                    <h3 className="font-medium text-foreground truncate flex-1">
+                      {ss.title || 'Untitled'}
+                    </h3>
+                    <span className="text-xs text-muted-foreground ml-2">
+                      {ss.slide_count} slides
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
+                    <span className="capitalize">{ss.style}</span>
+                    <span>•</span>
+                    <span className="capitalize">{ss.theme}</span>
+                    {ss.created_at && (
+                      <>
+                        <span>•</span>
+                        <span>{new Date(ss.created_at).toLocaleDateString()}</span>
+                      </>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={() => viewSlideshow(ss.id)}
+                    disabled={loadingSlideshow}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-primary/20 hover:bg-primary/30 text-primary text-sm font-medium transition-colors"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    View Slideshow
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Slideshow View Modal */}
+      {selectedSlideshow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="relative w-full max-w-5xl h-[85vh] mx-4">
+            {/* Modal Header */}
+            <div className="absolute top-0 left-0 right-0 flex items-center justify-between p-4 bg-background/90 backdrop-blur rounded-t-xl z-10">
+              <h3 className="font-semibold text-foreground">{selectedSlideshow.title}</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    if (selectedSlideshow.html) {
+                      const blob = new Blob([selectedSlideshow.html], { type: 'text/html' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `${selectedSlideshow.title || 'slideshow'}.html`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }
+                  }}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground text-sm transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                  Download
+                </button>
+                <button
+                  onClick={() => setSelectedSlideshow(null)}
+                  className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Slideshow Content */}
+            <div className="w-full h-full pt-16 rounded-xl overflow-hidden">
+              {loadingSlideshow ? (
+                <div className="flex items-center justify-center h-full bg-background">
+                  <Loader2 className="h-12 w-12 animate-spin text-muted-foreground" />
+                </div>
+              ) : selectedSlideshow.html ? (
+                <iframe
+                  srcDoc={selectedSlideshow.html}
+                  className="w-full h-full border-0 rounded-b-xl"
+                  title="Slideshow"
+                  sandbox="allow-scripts"
+                />
+              ) : (
+                <div className="flex items-center justify-center h-full bg-background text-muted-foreground">
+                  <p>No slideshow content available</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
